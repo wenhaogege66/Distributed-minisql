@@ -69,6 +69,12 @@ mvn clean package
 
 1. 首先确保 ZooKeeper 服务已启动（zkServer.cmd）
 
+清理 ZooKeeper 中的数据：
+zkCli.cmd
+deleteall /tables
+deleteall /master
+deleteall /region-servers
+
 2. 启动 Master 服务
 
 ```bash
@@ -116,17 +122,11 @@ start-client.bat
 
 详细的接口定义可以查看各组件的接口文件。
 
-## 开发指南
+## 测试
 
-### 添加新功能
-
-1. 在 Common 包中定义所需的数据结构和消息类型
-2. 在相应的接口中添加新方法
-3. 实现接口方法
-4. 在客户端添加相应的命令支持
-
-### 代码规范
-
-- 函数使用驼峰式命名法，局部变量使用蛇形命名法
-- 少写简单注释，长逻辑和复杂逻辑尽量写注释
-- 不要写无用的 try-catch 逻辑
+help
+CREATE TABLE student (id int, name char(20), age int, PRIMARY KEY(id));
+tables
+CREATE INDEX idx_name ON student (name);
+INSERT INTO student (id, name, age) VALUES (1, 'Zhang San', 20);
+SELECT \* FROM student;
