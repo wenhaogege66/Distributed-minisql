@@ -81,4 +81,25 @@ public interface RegionService extends Remote {
      * @return 服务器状态信息
      */
     Map<String, Object> getStatus() throws RemoteException;
+    
+    /**
+     * 心跳检测
+     * @return 如果RegionServer正常运行，返回true
+     */
+    boolean heartbeat() throws RemoteException;
+    
+    /**
+     * 获取表的所有数据
+     * @param tableName 表名
+     * @return 表中所有记录
+     */
+    List<Map<String, Object>> getAllTableData(String tableName) throws RemoteException;
+    
+    /**
+     * 从另一个RegionServer复制表数据
+     * @param tableName 表名
+     * @param sourceServer 源RegionServer
+     * @return 操作结果消息
+     */
+    Message replicateTableFrom(String tableName, String sourceServer) throws RemoteException;
 } 

@@ -3,12 +3,15 @@ D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\Client\ClientMain
 D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\Common\RPCUtils.java
 D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\Common\Message.java
 D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\Master\MasterMain.java
+D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\Master\FailureDetector.java
 D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\RegionServer\RegionService.java
 D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\Common\DataTypes.java
 D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\RegionServer\RegionMain.java
 D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\Common\Metadata.java
+D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\Common\HashShardingStrategy.java
 D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\Client\ClientService.java
 D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\Master\MasterServiceImpl.java
+D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\Common\ShardingStrategy.java
 D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\RegionServer\RegionServiceImpl.java
 D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\Master\MasterService.java
 D:\study-at-zju\Large-scale-theory\Project\Distributed-minisql\Common\ZKUtils.java

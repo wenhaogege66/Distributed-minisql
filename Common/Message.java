@@ -78,6 +78,15 @@ public class Message implements Serializable {
     }
     
     /**
+     * 创建带消息内容的成功响应消息
+     */
+    public static Message createSuccessResponse(String sender, String receiver, String message) {
+        Message response = new Message(MessageType.RESPONSE_SUCCESS, sender, receiver);
+        response.setData("message", message);
+        return response;
+    }
+    
+    /**
      * 创建错误响应消息
      */
     public static Message createErrorResponse(String sender, String receiver, String errorMessage) {

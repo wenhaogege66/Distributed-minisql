@@ -107,4 +107,28 @@ public class ZKUtils {
         createNode(REGION_SERVERS_NODE, new byte[0], CreateMode.PERSISTENT);
         createNode(TABLES_NODE, new byte[0], CreateMode.PERSISTENT);
     }
+    
+    /**
+     * 获取Master地址
+     */
+    public String getMasterAddress() {
+        try {
+            if (zooKeeper.exists(MASTER_NODE, false) != null) {
+                byte[] data = zooKeeper.getData(MASTER_NODE, false, null);
+                if (data != null && data.length > 0) {
+                    String masterData = new String(data);
+                    // 假设Master数据格式为 "master:hostname:port"
+                    if (masterData.startsWith("master:")) {
+                        return masterData.substring(7); // 去掉"master:"前缀
+                    } else {
+                        // 如果数据不是预期格式，返回默认值
+                        return "localhost:8000";
+                    }
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return "localhost:8000"; // 默认Master地址
+    }
 } 

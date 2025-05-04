@@ -69,6 +69,12 @@ mvn clean package
 
 1. 首先确保 ZooKeeper 服务已启动（zkServer.cmd）
 
+清理 ZooKeeper 中的数据：
+zkCli.cmd
+deleteall /tables
+deleteall /master
+deleteall /region-servers
+
 2. 启动 Master 服务
 
 ```bash
@@ -116,17 +122,114 @@ start-client.bat
 
 详细的接口定义可以查看各组件的接口文件。
 
-## 开发指南
+## 功能测试指南
 
-### 添加新功能
+### 基础功能测试
 
-1. 在 Common 包中定义所需的数据结构和消息类型
-2. 在相应的接口中添加新方法
-3. 实现接口方法
-4. 在客户端添加相应的命令支持
+1. **启动系统**
 
-### 代码规范
+   ```bash
+   # 启动ZooKeeper（确保已安装）
+   zkServer.cmd start
 
-- 函数使用驼峰式命名法，局部变量使用蛇形命名法
-- 少写简单注释，长逻辑和复杂逻辑尽量写注释
-- 不要写无用的 try-catch 逻辑
+   # 启动Master
+   start-master.bat
+
+   # 启动多个RegionServer（不同端口）
+   start-region.bat 9000（或者java -cp target\distributed-minisql-1.0-SNAPSHOT-jar-with-dependencies.jar RegionServer.RegionMain 9000）
+   start-region.bat 9001（或者java -cp target\distributed-minisql-1.0-SNAPSHOT-jar-with-dependencies.jar RegionServer.RegionMain 9001）
+
+   # 启动客户端
+   start-client.bat
+   ```
+
+2. **表操作测试**
+
+   ```sql
+   -- 创建表
+   CREATE TABLE test_table (id int, name char(20), score float, PRIMARY KEY(id));
+
+   -- 查看所有表
+   tables
+
+   -- 删除表
+   DROP TABLE test_table;
+   ```
+
+3. **索引操作测试**
+
+   ```sql
+   -- 创建索引
+   CREATE INDEX idx_name ON test_table (name);
+
+   -- 删除索引
+   DROP INDEX idx_name ON test_table;
+   ```
+
+4. **数据操作测试**
+
+   ```sql
+   -- 插入数据
+   INSERT INTO test_table (id, name, score) VALUES (1, 'Alice', 95.5);
+   INSERT INTO test_table (id, name, score) VALUES (2, 'Bob', 87.0);
+
+   -- 查询数据
+   SELECT * FROM test_table;
+   SELECT name, score FROM test_table WHERE id = 1;
+
+   -- 更新数据
+   UPDATE test_table SET score = 97.0 WHERE id = 1;
+
+   -- 删除数据
+   DELETE FROM test_table WHERE id = 2;
+   ```
+
+### 高级功能测试
+
+1. **数据分片测试**
+
+   - 创建大量数据，观察其在不同 RegionServer 的分布
+
+   ```sql
+   -- 创建测试表
+   CREATE TABLE shard_test (id int, data char(100), PRIMARY KEY(id));
+
+   -- 插入多条数据（可以用脚本批量插入）
+   INSERT INTO shard_test (id, data) VALUES (1, 'test_data_1');
+   ...
+   INSERT INTO shard_test (id, data) VALUES (1000, 'test_data_1000');
+
+   -- 检查数据分布（需要管理员命令或查看数据文件）
+   ```
+
+2. **负载均衡测试**
+
+   - 启动多个 RegionServer，创建多个表并插入数据
+   - 使用系统监控工具观察各 RegionServer 负载
+
+3. **容错与恢复测试**
+
+   ```
+   -- 准备工作：创建表并插入数据
+   CREATE TABLE fault_test (id int, name char(20), PRIMARY KEY(id));
+   INSERT INTO fault_test (id, name) VALUES (1, 'Test1');
+   INSERT INTO fault_test (id, name) VALUES (2, 'Test2');
+
+   -- 测试RegionServer故障恢复：
+   1. 记录当前数据所在RegionServer
+   2. 关闭该RegionServer（结束进程）
+   3. 等待系统自动恢复
+   4. 查询数据验证可用性
+   SELECT * FROM fault_test;
+   ```
+
+4. **数据复制测试**
+
+   ```
+   -- 准备工作：确保至少有两个RegionServer运行
+
+   -- 测试数据复制：
+   1. 创建表并插入数据
+   2. 查看数据复制状态（需要管理员命令）
+   3. 关闭主要RegionServer，验证数据仍可访问
+   ```

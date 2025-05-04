@@ -3,6 +3,7 @@ package RegionServer;
 import Common.Message;
 import Common.Metadata;
 import Common.ZKUtils;
+import Common.RPCUtils;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.WatchedEvent;
@@ -36,6 +37,8 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
     
     // 数据文件根目录
     private static final String DATA_ROOT_DIR = "data";
+    
+    private Master.MasterService masterService;
     
     /**
      * 构造函数
@@ -113,10 +116,26 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
      */
     private void initZooKeeper() {
         try {
+            // 连接ZooKeeper
             zkUtils = new ZKUtils();
             zkUtils.connect();
             
-            // 注册RegionServer节点
+            // 获取Master地址
+            String masterAddress = zkUtils.getMasterAddress();
+            if (masterAddress != null) {
+                String[] parts = masterAddress.split(":");
+                String masterHost = parts[0];
+                int masterPort = Integer.parseInt(parts[1]);
+                
+                // 连接Master服务
+                try {
+                    masterService = Common.RPCUtils.getMasterService(masterHost, masterPort);
+                } catch (Exception e) {
+                    System.err.println("连接Master失败: " + e.getMessage());
+                }
+            }
+            
+            // 注册服务器
             registerRegionServer();
             
             // 监听Master节点变化
@@ -228,6 +247,23 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             
             // 删除表目录
             deleteTableDirectory(tableName);
+            
+            // 从ZooKeeper中删除表节点
+            try {
+                String tableZkPath = ZKUtils.TABLES_NODE + "/" + tableName;
+                if (zkUtils.exists(tableZkPath, null)) {
+                    // 需要先删除子节点
+                    List<String> children = zkUtils.getChildren(tableZkPath, null);
+                    for (String child : children) {
+                        zkUtils.deleteNode(tableZkPath + "/" + child);
+                    }
+                    // 然后删除表节点
+                    zkUtils.deleteNode(tableZkPath);
+                }
+            } catch (KeeperException | InterruptedException e) {
+                System.err.println("删除ZooKeeper节点失败: " + e.getMessage());
+                // 继续执行，不要因为ZK问题而导致整个删除操作失败
+            }
             
             // 更新服务器状态
             serverStatus.put("tableCount", tableStorages.size());
@@ -492,6 +528,85 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
         return serverStatus;
     }
     
+    @Override
+    public boolean heartbeat() throws RemoteException {
+        // 更新最后心跳时间
+        serverStatus.put("lastHeartbeat", System.currentTimeMillis());
+        return true;
+    }
+    
+    @Override
+    public List<Map<String, Object>> getAllTableData(String tableName) throws RemoteException {
+        try {
+            // 检查表是否存在
+            if (!tableStorages.containsKey(tableName)) {
+                return new ArrayList<>();
+            }
+            
+            // 获取表存储
+            TableStorage tableStorage = tableStorages.get(tableName);
+            
+            // 获取表中所有数据
+            return tableStorage.getAllData();
+        } catch (Exception e) {
+            e.printStackTrace();
+            return new ArrayList<>();
+        }
+    }
+    
+    @Override
+    public Message replicateTableFrom(String tableName, String sourceServer) throws RemoteException {
+        try {
+            // 检查本地是否已有该表
+            if (tableStorages.containsKey(tableName)) {
+                return Message.createErrorResponse("region-" + hostname + ":" + port, "master", "表已存在: " + tableName);
+            }
+            
+            // 获取源服务器的RegionService
+            RegionService sourceRegionService = RPCUtils.getRegionService(sourceServer);
+            
+            // 首先获取表元数据信息
+            List<Metadata.TableInfo> allTables = masterService.getAllTables();
+            Metadata.TableInfo tableInfo = null;
+            
+            for (Metadata.TableInfo info : allTables) {
+                if (info.getTableName().equals(tableName)) {
+                    tableInfo = info;
+                    break;
+                }
+            }
+            
+            if (tableInfo == null) {
+                return Message.createErrorResponse("region-" + hostname + ":" + port, "master", "找不到表元数据: " + tableName);
+            }
+            
+            // 创建表
+            Message createResult = createTable(tableInfo);
+            if (createResult.getType() == Common.Message.MessageType.RESPONSE_ERROR) {
+                return createResult;
+            }
+            
+            // 从源RegionServer获取数据
+            List<Map<String, Object>> data = sourceRegionService.getAllTableData(tableName);
+            
+            // 将数据批量插入到本地
+            int successCount = 0;
+            for (Map<String, Object> record : data) {
+                Message insertResult = insert(tableName, record);
+                if (insertResult.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
+                    successCount++;
+                }
+            }
+            
+            Message response = Message.createSuccessResponse("region-" + hostname + ":" + port, "master");
+            response.setData("message", "成功复制表 " + tableName + " 数据，共 " + successCount + "/" + data.size() + " 条记录");
+            return response;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return Message.createErrorResponse("region-" + hostname + ":" + port, "master", "复制表数据失败: " + e.getMessage());
+        }
+    }
+    
     /**
      * 表存储类，管理表的数据和索引
      */
@@ -695,6 +810,11 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             int count = 0;
             Iterator<Map<String, Object>> iterator = data.iterator();
             
+            // 检查条件是否为空，如果为空，不删除任何记录
+            if (conditions == null || conditions.isEmpty()) {
+                return 0;
+            }
+            
             while (iterator.hasNext()) {
                 Map<String, Object> row = iterator.next();
                 boolean match = true;
@@ -704,7 +824,7 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
                     String columnName = condition.getKey();
                     Object value = condition.getValue();
                     
-                    if (!row.containsKey(columnName) || !row.get(columnName).equals(value)) {
+                    if (!row.containsKey(columnName) || !objectsEqual(row.get(columnName), value)) {
                         match = false;
                         break;
                     }
@@ -732,6 +852,11 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
         public int update(Map<String, Object> values, Map<String, Object> conditions) {
             int count = 0;
             
+            // 检查条件是否为空，如果为空，不更新任何记录
+            if (conditions == null || conditions.isEmpty()) {
+                return 0;
+            }
+            
             for (Map<String, Object> row : data) {
                 boolean match = true;
                 
@@ -740,7 +865,7 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
                     String columnName = condition.getKey();
                     Object value = condition.getValue();
                     
-                    if (!row.containsKey(columnName) || !row.get(columnName).equals(value)) {
+                    if (!row.containsKey(columnName) || !objectsEqual(row.get(columnName), value)) {
                         match = false;
                         break;
                     }
@@ -761,6 +886,41 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             }
             
             return count;
+        }
+        
+        /**
+         * 安全地比较两个对象，处理不同数据类型的比较
+         */
+        private boolean objectsEqual(Object obj1, Object obj2) {
+            if (obj1 == null && obj2 == null) {
+                return true;
+            }
+            if (obj1 == null || obj2 == null) {
+                return false;
+            }
+            
+            // 如果两个对象类型相同，直接比较
+            if (obj1.getClass() == obj2.getClass()) {
+                return obj1.equals(obj2);
+            }
+            
+            // 处理数值类型的比较
+            if (obj1 instanceof Number && obj2 instanceof Number) {
+                // 转换为 double 进行比较
+                double num1 = ((Number) obj1).doubleValue();
+                double num2 = ((Number) obj2).doubleValue();
+                return Math.abs(num1 - num2) < 0.0001; // 允许浮点数有小误差
+            }
+            
+            // 尝试字符串比较
+            return obj1.toString().equals(obj2.toString());
+        }
+        
+        /**
+         * 获取表中所有数据
+         */
+        public List<Map<String, Object>> getAllData() {
+            return new ArrayList<>(data);
         }
     }
     
