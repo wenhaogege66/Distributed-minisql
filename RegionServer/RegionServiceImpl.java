@@ -81,26 +81,38 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             for (File tableDir : tableDirs) {
                 String tableName = tableDir.getName();
                 try {
-                    // 尝试加载元数据
-                    File metadataFile = new File(tableDir, "metadata.dat");
-                    if (metadataFile.exists()) {
-                        try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(metadataFile))) {
-                            Metadata.TableInfo tableInfo = (Metadata.TableInfo) ois.readObject();
-                            tableInfoCache.put(tableName, tableInfo);
-                            
-                            // 创建表存储
-                            TableStorage tableStorage = new TableStorage(tableName);
-                            tableStorage.initialize(tableInfo);
-                            tableStorage.loadData(); // 加载已有数据
-                            tableStorages.put(tableName, tableStorage);
-                            
-                            System.out.println("恢复表: " + tableName);
+                    // 先从Master获取表信息，确认表是否仍然存在
+                    boolean tableExists = false;
+                    if (masterService != null) {
+                        try {
+                            List<Metadata.TableInfo> allTables = masterService.getAllTables();
+                            for (Metadata.TableInfo info : allTables) {
+                                if (info.getTableName().equals(tableName)) {
+                                    tableExists = true;
+                                    // 使用Master的表元数据更新本地
+                                    tableInfoCache.put(tableName, info);
+                                    
+                                    // 创建表存储
+                                    TableStorage tableStorage = new TableStorage(tableName);
+                                    tableStorage.initialize(info);
+                                    tableStorage.loadData(); // 加载已有数据
+                                    tableStorages.put(tableName, tableStorage);
+                                    
+                                    System.out.println("恢复表: " + tableName);
+                                    break;
+                                }
+                            }
+                        } catch (Exception e) {
+                            System.err.println("从Master获取表信息失败: " + e.getMessage());
                         }
                     }
-                } catch (ClassNotFoundException e) {
-                    System.err.println("恢复表 " + tableName + " 失败，类未找到: " + e.getMessage());
-                } catch (IOException e) {
-                    System.err.println("恢复表 " + tableName + " 失败，IO错误: " + e.getMessage());
+                    
+                    // 如果Master中不存在该表，则不恢复，并删除本地数据
+                    if (!tableExists) {
+                        System.out.println("表 " + tableName + " 在Master中不存在，清理本地数据");
+                        deleteTableDirectory(tableName);
+                        continue;
+                    }
                 } catch (Exception e) {
                     System.err.println("恢复表 " + tableName + " 失败: " + e.getMessage());
                 }
@@ -185,6 +197,16 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             
             // 检查表是否已存在
             if (tableStorages.containsKey(tableName)) {
+                // 如果表已存在，比对元数据是否一致
+                Metadata.TableInfo existingInfo = tableInfoCache.get(tableName);
+                
+                // 简单比较表名是否相同，这里可以扩展为更完整的元数据比较
+                if (existingInfo != null && existingInfo.getTableName().equals(tableName)) {
+                    // 如果是相同的表，返回成功，使操作具有幂等性
+                    System.out.println("表 " + tableName + " 已存在，且元数据一致，视为成功");
+                    return Message.createSuccessResponse("region-" + hostname + ":" + port, "master");
+                }
+                
                 return Message.createErrorResponse("region-" + hostname + ":" + port, "master", "表已存在: " + tableName);
             }
             

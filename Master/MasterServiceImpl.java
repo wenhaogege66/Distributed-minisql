@@ -310,11 +310,21 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
      * 递归删除ZooKeeper节点及其所有子节点
      */
     private void deleteZkNodesRecursively(String path) throws KeeperException, InterruptedException {
-        List<String> children = zkUtils.getChildren(path, null);
-        for (String child : children) {
-            deleteZkNodesRecursively(path + "/" + child);
+        try {
+            List<String> children = zkUtils.getChildren(path, null);
+            for (String child : children) {
+                String childPath = path + "/" + child;
+                deleteZkNodesRecursively(childPath);
+            }
+            zkUtils.deleteNode(path);
+            System.out.println("成功删除ZooKeeper节点: " + path);
+        } catch (KeeperException.NoNodeException e) {
+            // 节点已不存在，忽略此异常
+            System.out.println("ZooKeeper节点不存在，无需删除: " + path);
+        } catch (Exception e) {
+            System.err.println("删除ZooKeeper节点失败: " + path + ", 错误: " + e.getMessage());
+            throw e;
         }
-        zkUtils.deleteNode(path);
     }
     
     @Override

@@ -62,9 +62,35 @@ public class ZKUtils {
      * 删除ZNode节点
      */
     public void deleteNode(String path) throws KeeperException, InterruptedException {
-        Stat stat = zooKeeper.exists(path, false);
-        if (stat != null) {
-            zooKeeper.delete(path, -1);
+        try {
+            Stat stat = zooKeeper.exists(path, false);
+            if (stat != null) {
+                zooKeeper.delete(path, -1);
+                System.out.println("删除ZooKeeper节点: " + path + " 成功");
+            } else {
+                System.out.println("ZooKeeper节点不存在，无需删除: " + path);
+            }
+        } catch (KeeperException.NoNodeException e) {
+            // 节点已不存在，忽略此异常
+            System.out.println("ZooKeeper节点不存在，无需删除: " + path);
+        } catch (KeeperException.NotEmptyException e) {
+            System.err.println("ZooKeeper节点有子节点，无法直接删除: " + path);
+            try {
+                // 尝试删除子节点
+                List<String> children = zooKeeper.getChildren(path, false);
+                for (String child : children) {
+                    deleteNode(path + "/" + child);
+                }
+                // 再次尝试删除父节点
+                zooKeeper.delete(path, -1);
+                System.out.println("删除包含子节点的ZooKeeper节点: " + path + " 成功");
+            } catch (Exception nestedE) {
+                System.err.println("尝试删除子节点后仍然无法删除: " + path + ", 错误: " + nestedE.getMessage());
+                throw nestedE;
+            }
+        } catch (Exception e) {
+            System.err.println("删除ZooKeeper节点失败: " + path + ", 错误: " + e.getMessage());
+            throw e;
         }
     }
     

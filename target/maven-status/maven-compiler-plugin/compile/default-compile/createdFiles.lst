@@ -6,7 +6,6 @@ Common\Metadata$IndexInfo.class
 Common\Metadata$TableInfo.class
 Master\MasterServiceImpl.class
 Common\DataTypes$IntType.class
-target\classes\start-region.sh
 Common\DataTypes$DataType.class
 Common\ZKUtils.class
 Master\FailureDetector.class
