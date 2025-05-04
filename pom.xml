@@ -105,5 +105,14 @@
                 </executions>
             </plugin>
         </plugins>
+        <sourceDirectory>${project.basedir}</sourceDirectory>
+        <resources>
+          <resource>
+            <directory>${project.basedir}</directory>
+            <excludes>
+              <exclude>**/*.java</exclude>
+            </excludes>
+          </resource>
+        </resources>
     </build>
 </project> 

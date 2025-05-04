@@ -2,7 +2,9 @@ package Master;
 
 import Common.Message;
 import Common.Metadata;
+import Common.RPCUtils;
 import Common.ZKUtils;
+import RegionServer.RegionService;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.WatchedEvent;
@@ -12,7 +14,6 @@ import java.io.*;
 import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -61,8 +62,36 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
             
             // 监听RegionServer节点变化
             watchRegionServers();
+            
+            // 恢复表元数据
+            recoverTableMetadata();
         } catch (Exception e) {
             e.printStackTrace();
+        }
+    }
+    
+    /**
+     * 恢复表元数据
+     */
+    private void recoverTableMetadata() throws KeeperException, InterruptedException, IOException, ClassNotFoundException {
+        List<String> tableNodes = zkUtils.getChildren(ZKUtils.TABLES_NODE, this);
+        for (String tableName : tableNodes) {
+            String tablePath = ZKUtils.TABLES_NODE + "/" + tableName;
+            byte[] data = zkUtils.getData(tablePath, null);
+            if (data != null && data.length > 0) {
+                Metadata.TableInfo tableInfo = deserialize(data);
+                tables.put(tableName, tableInfo);
+                
+                // 恢复表区域信息
+                String regionPath = tablePath + "/regions";
+                if (zkUtils.exists(regionPath, null)) {
+                    byte[] regionData = zkUtils.getData(regionPath, null);
+                    if (regionData != null && regionData.length > 0) {
+                        Metadata.TableRegionInfo regionInfo = deserialize(regionData);
+                        tableRegions.put(tableName, regionInfo);
+                    }
+                }
+            }
         }
     }
     
@@ -137,7 +166,20 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
             zkUtils.createNode(regionPath, serialize(regionInfo), CreateMode.PERSISTENT);
             
             // 通知RegionServer创建表
-            // 这里应该有RPC调用逻辑，通知选中的RegionServer创建表
+            RegionService regionService = RPCUtils.getRegionService(selectedRegionServer);
+            if (regionService != null) {
+                Message response = regionService.createTable(tableInfo);
+                if (response.getType() == Common.Message.MessageType.RESPONSE_ERROR) {
+                    // 如果RegionServer创建失败，回滚Master的操作
+                    tables.remove(tableName);
+                    tableRegions.remove(tableName);
+                    zkUtils.deleteNode(regionPath);
+                    zkUtils.deleteNode(tablePath);
+                    return Message.createErrorResponse("master", "client", "RegionServer创建表失败: " + response.getData("error"));
+                }
+            } else {
+                return Message.createErrorResponse("master", "client", "无法连接到RegionServer: " + selectedRegionServer);
+            }
             
             return Message.createSuccessResponse("master", "client");
         } catch (Exception e) {
@@ -159,7 +201,25 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
             List<String> servers = regionInfo.getRegionServers();
             
             // 通知所有相关RegionServer删除表
-            // 这里应该有RPC调用逻辑，通知RegionServer删除表
+            boolean allSuccess = true;
+            for (String server : servers) {
+                try {
+                    RegionService regionService = RPCUtils.getRegionService(server);
+                    if (regionService != null) {
+                        Message response = regionService.dropTable(tableName);
+                        if (response.getType() == Common.Message.MessageType.RESPONSE_ERROR) {
+                            allSuccess = false;
+                        }
+                    }
+                } catch (Exception e) {
+                    allSuccess = false;
+                    e.printStackTrace();
+                }
+            }
+            
+            if (!allSuccess) {
+                return Message.createErrorResponse("master", "client", "部分RegionServer删除表失败");
+            }
             
             // 删除表元数据
             tables.remove(tableName);
@@ -167,6 +227,12 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
             
             // 删除表节点
             String tablePath = ZKUtils.TABLES_NODE + "/" + tableName;
+            // 首先删除子节点
+            String regionsPath = tablePath + "/regions";
+            if (zkUtils.exists(regionsPath, null)) {
+                zkUtils.deleteNode(regionsPath);
+            }
+            // 然后删除表节点
             zkUtils.deleteNode(tablePath);
             
             return Message.createSuccessResponse("master", "client");
@@ -204,7 +270,32 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
             List<String> servers = regionInfo.getRegionServers();
             
             // 通知所有相关RegionServer创建索引
-            // 这里应该有RPC调用逻辑，通知RegionServer创建索引
+            boolean allSuccess = true;
+            for (String server : servers) {
+                try {
+                    RegionService regionService = RPCUtils.getRegionService(server);
+                    if (regionService != null) {
+                        Message response = regionService.createIndex(indexInfo);
+                        if (response.getType() == Common.Message.MessageType.RESPONSE_ERROR) {
+                            allSuccess = false;
+                        }
+                    }
+                } catch (Exception e) {
+                    allSuccess = false;
+                    e.printStackTrace();
+                }
+            }
+            
+            if (!allSuccess) {
+                // 回滚索引创建
+                for (int i = 0; i < tableInfo.getIndexes().size(); i++) {
+                    if (tableInfo.getIndexes().get(i).getIndexName().equals(indexName)) {
+                        tableInfo.getIndexes().remove(i);
+                        break;
+                    }
+                }
+                return Message.createErrorResponse("master", "client", "部分RegionServer创建索引失败");
+            }
             
             // 更新表元数据
             String tablePath = ZKUtils.TABLES_NODE + "/" + tableName;
@@ -247,7 +338,25 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
             List<String> servers = regionInfo.getRegionServers();
             
             // 通知所有相关RegionServer删除索引
-            // 这里应该有RPC调用逻辑，通知RegionServer删除索引
+            boolean allSuccess = true;
+            for (String server : servers) {
+                try {
+                    RegionService regionService = RPCUtils.getRegionService(server);
+                    if (regionService != null) {
+                        Message response = regionService.dropIndex(indexName, tableName);
+                        if (response.getType() == Common.Message.MessageType.RESPONSE_ERROR) {
+                            allSuccess = false;
+                        }
+                    }
+                } catch (Exception e) {
+                    allSuccess = false;
+                    e.printStackTrace();
+                }
+            }
+            
+            if (!allSuccess) {
+                return Message.createErrorResponse("master", "client", "部分RegionServer删除索引失败");
+            }
             
             // 更新表元数据
             String tablePath = ZKUtils.TABLES_NODE + "/" + tableName;

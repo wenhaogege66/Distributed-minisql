@@ -1,5 +1,7 @@
 package Common;
 
+import java.io.Serializable;
+
 /**
  * 定义系统中使用的数据类型
  */
@@ -13,7 +15,9 @@ public class DataTypes {
     }
     
     // 数据类型基类
-    public abstract static class DataType {
+    public abstract static class DataType implements Serializable {
+        private static final long serialVersionUID = 1L;
+        
         protected Type type;
         
         public Type getType() {
@@ -26,6 +30,8 @@ public class DataTypes {
     
     // 整型
     public static class IntType extends DataType {
+        private static final long serialVersionUID = 2L;
+        
         public IntType() {
             this.type = Type.INT;
         }
@@ -43,6 +49,8 @@ public class DataTypes {
     
     // 浮点型
     public static class FloatType extends DataType {
+        private static final long serialVersionUID = 3L;
+        
         public FloatType() {
             this.type = Type.FLOAT;
         }
@@ -60,6 +68,8 @@ public class DataTypes {
     
     // 字符型
     public static class CharType extends DataType {
+        private static final long serialVersionUID = 4L;
+        
         private int length;
         
         public CharType(int length) {
@@ -84,6 +94,8 @@ public class DataTypes {
     
     // 可变长字符型
     public static class VarcharType extends DataType {
+        private static final long serialVersionUID = 5L;
+        
         private int maxLength;
         
         public VarcharType(int maxLength) {

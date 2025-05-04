@@ -34,6 +34,9 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
     // 服务器状态
     private Map<String, Object> serverStatus;
     
+    // 数据文件根目录
+    private static final String DATA_ROOT_DIR = "data";
+    
     /**
      * 构造函数
      */
@@ -52,8 +55,57 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
         serverStatus.put("startTime", System.currentTimeMillis());
         serverStatus.put("tableCount", 0);
         
+        // 创建数据目录
+        File dataDir = new File(DATA_ROOT_DIR);
+        if (!dataDir.exists()) {
+            dataDir.mkdirs();
+        }
+        
         // 初始化ZooKeeper连接
         initZooKeeper();
+        
+        // 恢复本地表数据
+        recoverLocalTables();
+    }
+    
+    /**
+     * 恢复本地表数据
+     */
+    private void recoverLocalTables() {
+        File dataDir = new File(DATA_ROOT_DIR);
+        File[] tableDirs = dataDir.listFiles(File::isDirectory);
+        if (tableDirs != null) {
+            for (File tableDir : tableDirs) {
+                String tableName = tableDir.getName();
+                try {
+                    // 尝试加载元数据
+                    File metadataFile = new File(tableDir, "metadata.dat");
+                    if (metadataFile.exists()) {
+                        try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(metadataFile))) {
+                            Metadata.TableInfo tableInfo = (Metadata.TableInfo) ois.readObject();
+                            tableInfoCache.put(tableName, tableInfo);
+                            
+                            // 创建表存储
+                            TableStorage tableStorage = new TableStorage(tableName);
+                            tableStorage.initialize(tableInfo);
+                            tableStorage.loadData(); // 加载已有数据
+                            tableStorages.put(tableName, tableStorage);
+                            
+                            System.out.println("恢复表: " + tableName);
+                        }
+                    }
+                } catch (ClassNotFoundException e) {
+                    System.err.println("恢复表 " + tableName + " 失败，类未找到: " + e.getMessage());
+                } catch (IOException e) {
+                    System.err.println("恢复表 " + tableName + " 失败，IO错误: " + e.getMessage());
+                } catch (Exception e) {
+                    System.err.println("恢复表 " + tableName + " 失败: " + e.getMessage());
+                }
+            }
+            
+            // 更新服务器状态
+            serverStatus.put("tableCount", tableStorages.size());
+        }
     }
     
     /**
@@ -125,13 +177,34 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             tableStorages.put(tableName, tableStorage);
             tableInfoCache.put(tableName, tableInfo);
             
+            // 保存表元数据到文件
+            saveTableMetadata(tableName, tableInfo);
+            
             // 更新服务器状态
             serverStatus.put("tableCount", tableStorages.size());
+            
+            System.out.println("成功创建表: " + tableName);
             
             return Message.createSuccessResponse("region-" + hostname + ":" + port, "master");
         } catch (Exception e) {
             e.printStackTrace();
             return Message.createErrorResponse("region-" + hostname + ":" + port, "master", "创建表失败: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 保存表元数据到文件
+     */
+    private void saveTableMetadata(String tableName, Metadata.TableInfo tableInfo) throws IOException {
+        String tableDir = DATA_ROOT_DIR + "/" + tableName;
+        File dir = new File(tableDir);
+        if (!dir.exists()) {
+            dir.mkdirs();
+        }
+        
+        File metadataFile = new File(dir, "metadata.dat");
+        try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(metadataFile))) {
+            oos.writeObject(tableInfo);
         }
     }
     
@@ -153,14 +226,46 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             tableStorages.remove(tableName);
             tableInfoCache.remove(tableName);
             
+            // 删除表目录
+            deleteTableDirectory(tableName);
+            
             // 更新服务器状态
             serverStatus.put("tableCount", tableStorages.size());
+            
+            System.out.println("成功删除表: " + tableName);
             
             return Message.createSuccessResponse("region-" + hostname + ":" + port, "master");
         } catch (Exception e) {
             e.printStackTrace();
             return Message.createErrorResponse("region-" + hostname + ":" + port, "master", "删除表失败: " + e.getMessage());
         }
+    }
+    
+    /**
+     * 删除表目录
+     */
+    private void deleteTableDirectory(String tableName) {
+        File tableDir = new File(DATA_ROOT_DIR + "/" + tableName);
+        if (tableDir.exists()) {
+            deleteDirectory(tableDir);
+        }
+    }
+    
+    /**
+     * 递归删除目录
+     */
+    private boolean deleteDirectory(File directory) {
+        File[] files = directory.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                if (file.isDirectory()) {
+                    deleteDirectory(file);
+                } else {
+                    file.delete();
+                }
+            }
+        }
+        return directory.delete();
     }
     
     @Override
@@ -182,6 +287,11 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             
             // 创建索引
             tableStorage.createIndex(indexInfo);
+            
+            // 保存表元数据到文件
+            saveTableMetadata(tableName, tableInfo);
+            
+            System.out.println("成功创建索引: " + indexInfo.getIndexName() + " 在表 " + tableName);
             
             return Message.createSuccessResponse("region-" + hostname + ":" + port, "master");
         } catch (Exception e) {
@@ -220,6 +330,11 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             // 删除索引
             tableStorage.dropIndex(indexName);
             
+            // 保存表元数据到文件
+            saveTableMetadata(tableName, tableInfo);
+            
+            System.out.println("成功删除索引: " + indexName + " 在表 " + tableName);
+            
             return Message.createSuccessResponse("region-" + hostname + ":" + port, "master");
         } catch (Exception e) {
             e.printStackTrace();
@@ -252,6 +367,8 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             if (!success) {
                 return Message.createErrorResponse("region-" + hostname + ":" + port, "client", "插入数据失败");
             }
+            
+            System.out.println("成功插入数据到表: " + tableName);
             
             return Message.createSuccessResponse("region-" + hostname + ":" + port, "client");
         } catch (Exception e) {
@@ -306,6 +423,8 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             // 执行删除
             int count = tableStorage.delete(conditions);
             
+            System.out.println("成功从表 " + tableName + " 删除 " + count + " 条记录");
+            
             Message response = Message.createSuccessResponse("region-" + hostname + ":" + port, "client");
             response.setData("deletedCount", count);
             return response;
@@ -327,7 +446,11 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             TableStorage tableStorage = tableStorages.get(tableName);
             
             // 执行查询
-            return tableStorage.select(columns, conditions);
+            List<Map<String, Object>> result = tableStorage.select(columns, conditions);
+            
+            System.out.println("成功从表 " + tableName + " 查询 " + result.size() + " 条记录");
+            
+            return result;
         } catch (Exception e) {
             e.printStackTrace();
             throw new RemoteException("查询数据失败: " + e.getMessage());
@@ -347,6 +470,8 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             
             // 执行更新
             int count = tableStorage.update(values, conditions);
+            
+            System.out.println("成功更新表 " + tableName + " 的 " + count + " 条记录");
             
             Message response = Message.createSuccessResponse("region-" + hostname + ":" + port, "client");
             response.setData("updatedCount", count);
@@ -374,7 +499,7 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
         private String tableName;
         private File dataFile;
         private Map<String, File> indexFiles;
-        private List<Map<String, Object>> data; // 简化实现，实际应该使用文件存储
+        private List<Map<String, Object>> data; // 内存中的数据
         
         public TableStorage(String tableName) {
             this.tableName = tableName;
@@ -385,10 +510,10 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
         /**
          * 初始化表存储
          */
-        public void initialize(Metadata.TableInfo tableInfo) throws IOException {
+        public void initialize(Metadata.TableInfo tableInfo) throws IOException, ClassNotFoundException {
             // 创建数据文件
-            String dataDir = "data/" + tableName;
-            File dir = new File(dataDir);
+            String tableDir = DATA_ROOT_DIR + "/" + tableName;
+            File dir = new File(tableDir);
             if (!dir.exists()) {
                 dir.mkdirs();
             }
@@ -396,11 +521,33 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             dataFile = new File(dir, "data.db");
             if (!dataFile.exists()) {
                 dataFile.createNewFile();
+                // 写入一个空列表，以初始化文件
+                try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(dataFile))) {
+                    oos.writeObject(new ArrayList<Map<String, Object>>());
+                }
             }
             
             // 创建索引文件
             for (Metadata.IndexInfo indexInfo : tableInfo.getIndexes()) {
                 createIndex(indexInfo);
+            }
+            
+            // 加载数据
+            loadData();
+        }
+        
+        /**
+         * 加载数据
+         */
+        @SuppressWarnings("unchecked")
+        public void loadData() throws IOException, ClassNotFoundException {
+            if (dataFile.exists() && dataFile.length() > 0) {
+                try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(dataFile))) {
+                    data = (List<Map<String, Object>>) ois.readObject();
+                } catch (ClassNotFoundException e) {
+                    System.err.println("加载数据时类未找到: " + e.getMessage());
+                    throw e;
+                }
             }
         }
         
@@ -419,7 +566,7 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             String indexName = indexInfo.getIndexName();
             
             // 创建索引文件
-            String indexDir = "data/" + tableName + "/indexes";
+            String indexDir = DATA_ROOT_DIR + "/" + tableName + "/indexes";
             File dir = new File(indexDir);
             if (!dir.exists()) {
                 dir.mkdirs();
@@ -491,9 +638,9 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
         private void saveData() throws IOException {
             // 实际应该使用数据库文件格式
             // 这里简化实现，使用序列化
-            ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(dataFile));
-            oos.writeObject(data);
-            oos.close();
+            try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(dataFile))) {
+                oos.writeObject(data);
+            }
         }
         
         /**
@@ -614,6 +761,22 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             }
             
             return count;
+        }
+    }
+    
+    /**
+     * 反序列化对象
+     */
+    private <T> T deserialize(byte[] data) throws IOException, ClassNotFoundException {
+        try {
+            ByteArrayInputStream byteStream = new ByteArrayInputStream(data);
+            ObjectInputStream objectStream = new ObjectInputStream(byteStream);
+            T object = (T) objectStream.readObject();
+            objectStream.close();
+            return object;
+        } catch (ClassNotFoundException e) {
+            System.err.println("反序列化时未找到类: " + e.getMessage());
+            throw e;
         }
     }
 } 

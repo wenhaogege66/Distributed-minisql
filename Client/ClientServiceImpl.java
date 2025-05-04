@@ -2,6 +2,7 @@ package Client;
 
 import Common.Message;
 import Common.Metadata;
+import Common.RPCUtils;
 import Master.MasterService;
 import RegionServer.RegionService;
 
@@ -18,14 +19,12 @@ import java.util.regex.Pattern;
 public class ClientServiceImpl implements ClientService {
     
     private MasterService masterService;
-    private Map<String, RegionService> regionServices;
     private Map<String, List<String>> tableRegions; // tableName -> regionServers
     
     /**
      * 构造函数
      */
     public ClientServiceImpl() {
-        regionServices = new HashMap<>();
         tableRegions = new HashMap<>();
     }
     
@@ -33,8 +32,7 @@ public class ClientServiceImpl implements ClientService {
     public boolean connect(String masterHost, int masterPort) {
         try {
             // 连接到Master
-            Registry registry = LocateRegistry.getRegistry(masterHost, masterPort);
-            masterService = (MasterService) registry.lookup("MasterService");
+            masterService = RPCUtils.getMasterService(masterHost, masterPort);
             
             System.out.println("Connected to Master at " + masterHost + ":" + masterPort);
             return true;
@@ -48,8 +46,8 @@ public class ClientServiceImpl implements ClientService {
     @Override
     public void disconnect() {
         masterService = null;
-        regionServices.clear();
         tableRegions.clear();
+        RPCUtils.clearCache();
         System.out.println("Disconnected from server");
     }
     
@@ -246,44 +244,100 @@ public class ClientServiceImpl implements ClientService {
      * 执行INSERT语句
      */
     private Message executeInsert(String sql) throws RemoteException {
-        // 解析INSERT语句
-        Pattern pattern = Pattern.compile("INSERT\\s+INTO\\s+(\\w+)\\s*\\((.+?)\\)\\s*VALUES\\s*\\((.+?)\\);?", Pattern.CASE_INSENSITIVE);
-        Matcher matcher = pattern.matcher(sql);
-        
-        if (!matcher.find()) {
-            return Message.createErrorResponse("client", "user", "SQL语法错误: " + sql);
-        }
-        
-        String tableName = matcher.group(1);
-        String columnsStr = matcher.group(2);
-        String valuesStr = matcher.group(3);
-        
-        // 解析列名和值
-        String[] columns = columnsStr.split(",");
-        String[] values = valuesStr.split(",");
-        
-        if (columns.length != values.length) {
-            return Message.createErrorResponse("client", "user", "列数与值数不匹配");
-        }
-        
-        // 构建插入数据
-        Map<String, Object> data = new HashMap<>();
-        for (int i = 0; i < columns.length; i++) {
-            String column = columns[i].trim();
-            String value = values[i].trim();
+        try {
+            // 尝试解析第一种格式：INSERT INTO table_name (col1, col2, ...) VALUES (val1, val2, ...)
+            Pattern pattern1 = Pattern.compile("INSERT\\s+INTO\\s+(\\w+)\\s*\\((.+?)\\)\\s*VALUES\\s*\\((.+?)\\);?", Pattern.CASE_INSENSITIVE);
+            Matcher matcher1 = pattern1.matcher(sql);
             
-            // 去掉引号
-            if (value.startsWith("'") && value.endsWith("'")) {
-                value = value.substring(1, value.length() - 1);
-            } else if (value.startsWith("\"") && value.endsWith("\"")) {
-                value = value.substring(1, value.length() - 1);
+            if (matcher1.find()) {
+                String tableName = matcher1.group(1);
+                String columnsStr = matcher1.group(2);
+                String valuesStr = matcher1.group(3);
+                
+                // 解析列名和值
+                String[] columns = columnsStr.split(",");
+                String[] values = valuesStr.split(",");
+                
+                if (columns.length != values.length) {
+                    return Message.createErrorResponse("client", "user", "列数与值数不匹配");
+                }
+                
+                // 构建插入数据
+                Map<String, Object> data = new HashMap<>();
+                for (int i = 0; i < columns.length; i++) {
+                    String column = columns[i].trim();
+                    String value = values[i].trim();
+                    
+                    // 去掉引号
+                    if (value.startsWith("'") && value.endsWith("'")) {
+                        value = value.substring(1, value.length() - 1);
+                    } else if (value.startsWith("\"") && value.endsWith("\"")) {
+                        value = value.substring(1, value.length() - 1);
+                    }
+                    
+                    data.put(column, value);
+                }
+                
+                // 调用RegionServer插入数据
+                return insert(tableName, data);
             }
             
-            data.put(column, value);
+            // 尝试解析第二种格式：INSERT INTO table_name VALUES (val1, val2, ...)
+            Pattern pattern2 = Pattern.compile("INSERT\\s+INTO\\s+(\\w+)\\s+VALUES\\s*\\((.+?)\\);?", Pattern.CASE_INSENSITIVE);
+            Matcher matcher2 = pattern2.matcher(sql);
+            
+            if (matcher2.find()) {
+                String tableName = matcher2.group(1);
+                String valuesStr = matcher2.group(2);
+                
+                // 获取表元数据
+                List<Metadata.TableInfo> tables = getAllTables();
+                Metadata.TableInfo tableInfo = null;
+                
+                for (Metadata.TableInfo table : tables) {
+                    if (table.getTableName().equals(tableName)) {
+                        tableInfo = table;
+                        break;
+                    }
+                }
+                
+                if (tableInfo == null) {
+                    return Message.createErrorResponse("client", "user", "表不存在: " + tableName);
+                }
+                
+                // 解析值
+                String[] values = valuesStr.split(",");
+                List<Metadata.ColumnInfo> columns = tableInfo.getColumns();
+                
+                if (columns.size() != values.length) {
+                    return Message.createErrorResponse("client", "user", "列数(" + columns.size() + ")与值数(" + values.length + ")不匹配");
+                }
+                
+                // 构建插入数据
+                Map<String, Object> data = new HashMap<>();
+                for (int i = 0; i < columns.size(); i++) {
+                    String columnName = columns.get(i).getColumnName();
+                    String value = values[i].trim();
+                    
+                    // 去掉引号
+                    if (value.startsWith("'") && value.endsWith("'")) {
+                        value = value.substring(1, value.length() - 1);
+                    } else if (value.startsWith("\"") && value.endsWith("\"")) {
+                        value = value.substring(1, value.length() - 1);
+                    }
+                    
+                    data.put(columnName, value);
+                }
+                
+                // 调用RegionServer插入数据
+                return insert(tableName, data);
+            }
+            
+            return Message.createErrorResponse("client", "user", "SQL语法错误: " + sql);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return Message.createErrorResponse("client", "user", "插入数据失败: " + e.getMessage());
         }
-        
-        // 调用RegionServer插入数据
-        return insert(tableName, data);
     }
     
     /**
@@ -553,7 +607,7 @@ public class ClientServiceImpl implements ClientService {
             
             // 选择第一个RegionServer
             String regionServer = servers.get(0);
-            RegionService regionService = getRegionService(regionServer);
+            RegionService regionService = RPCUtils.getRegionService(regionServer);
             
             // 调用RegionServer插入数据
             return regionService.insert(tableName, values);
@@ -578,7 +632,7 @@ public class ClientServiceImpl implements ClientService {
             
             // 选择第一个RegionServer
             String regionServer = servers.get(0);
-            RegionService regionService = getRegionService(regionServer);
+            RegionService regionService = RPCUtils.getRegionService(regionServer);
             
             // 调用RegionServer删除数据
             return regionService.delete(tableName, conditions);
@@ -603,7 +657,7 @@ public class ClientServiceImpl implements ClientService {
             
             // 选择第一个RegionServer
             String regionServer = servers.get(0);
-            RegionService regionService = getRegionService(regionServer);
+            RegionService regionService = RPCUtils.getRegionService(regionServer);
             
             // 调用RegionServer查询数据
             return regionService.select(tableName, columns, conditions);
@@ -629,7 +683,7 @@ public class ClientServiceImpl implements ClientService {
             
             // 选择第一个RegionServer
             String regionServer = servers.get(0);
-            RegionService regionService = getRegionService(regionServer);
+            RegionService regionService = RPCUtils.getRegionService(regionServer);
             
             // 调用RegionServer更新数据
             return regionService.update(tableName, values, conditions);
@@ -659,29 +713,6 @@ public class ClientServiceImpl implements ClientService {
             e.printStackTrace();
             return new ArrayList<>();
         }
-    }
-    
-    /**
-     * 获取RegionService实例
-     */
-    private RegionService getRegionService(String regionServer) throws Exception {
-        if (regionServices.containsKey(regionServer)) {
-            return regionServices.get(regionServer);
-        }
-        
-        // 解析主机名和端口
-        String[] parts = regionServer.split(":");
-        String host = parts[0];
-        int port = Integer.parseInt(parts[1]);
-        
-        // 连接到RegionServer
-        Registry registry = LocateRegistry.getRegistry(host, port);
-        RegionService regionService = (RegionService) registry.lookup("RegionService");
-        
-        // 缓存RegionService实例
-        regionServices.put(regionServer, regionService);
-        
-        return regionService;
     }
     
     /**

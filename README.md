@@ -67,7 +67,7 @@ mvn clean package
 
 ### 启动服务
 
-1. 首先确保 ZooKeeper 服务已启动
+1. 首先确保 ZooKeeper 服务已启动（zkServer.cmd）
 
 2. 启动 Master 服务
 
@@ -77,6 +77,9 @@ mvn clean package
 
 # Windows
 start-master.bat
+
+#打印
+Master started on port 8000
 ```
 
 3. 启动 RegionServer 服务（可以启动多个，端口不同）
@@ -87,6 +90,10 @@ start-master.bat
 
 # Windows
 start-region.bat 9000
+
+#打印
+RegionServer registered: DESKTOP-RJS0D8P:9000
+RegionServer started on DESKTOP-RJS0D8P:9000
 ```
 
 4. 启动客户端
