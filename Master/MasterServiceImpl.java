@@ -192,6 +192,7 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
             
             // 通知RegionServer创建表
             boolean allSuccess = true;
+            List<String> failedServers = new ArrayList<>();
             for (String server : selectedServers) {
                 try {
                     RegionService regionService = RPCUtils.getRegionService(server);
@@ -199,12 +200,18 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
                         Message response = regionService.createTable(tableInfo);
                         if (response.getType() == Common.Message.MessageType.RESPONSE_ERROR) {
                             allSuccess = false;
+                            failedServers.add(server);
+                            System.err.println("RegionServer " + server + " 创建表失败: " + response.getData("error"));
                         }
                     } else {
                         allSuccess = false;
+                        failedServers.add(server);
+                        System.err.println("无法获取RegionServer服务: " + server);
                     }
                 } catch (Exception e) {
                     allSuccess = false;
+                    failedServers.add(server);
+                    System.err.println("RegionServer " + server + " 创建表异常: " + e.getMessage());
                     e.printStackTrace();
                 }
             }
@@ -215,7 +222,8 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
                 tableRegions.remove(tableName);
                 zkUtils.deleteNode(regionPath);
                 zkUtils.deleteNode(tablePath);
-                return Message.createErrorResponse("master", "client", "部分RegionServer创建表失败");
+                return Message.createErrorResponse("master", "client", 
+                    "部分RegionServer创建表失败，失败的服务器: " + String.join(", ", failedServers));
             }
             
             return Message.createSuccessResponse("master", "client");

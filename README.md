@@ -140,7 +140,7 @@ start-client.bat
    start-region.bat 9001（或者java -cp target\distributed-minisql-1.0-SNAPSHOT-jar-with-dependencies.jar RegionServer.RegionMain 9001）
 
    # 启动客户端
-   start-client.bat
+   start-client.bat（或者java -cp target\distributed-minisql-1.0-SNAPSHOT-jar-with-dependencies.jar Client.ClientMain）
    ```
 
 2. **表操作测试**

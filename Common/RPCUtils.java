@@ -55,14 +55,29 @@ public class RPCUtils {
         String host = parts[0];
         int port = Integer.parseInt(parts[1]);
         
-        // 获取服务
-        Registry registry = LocateRegistry.getRegistry(host, port);
-        RegionService service = (RegionService) registry.lookup("RegionService");
-        
-        // 缓存服务
-        serviceCache.put(key, service);
-        
-        return service;
+        int retryCount = 3;
+        while (retryCount > 0) {
+            try {
+                // 获取服务
+                Registry registry = LocateRegistry.getRegistry(host, port);
+                RegionService service = (RegionService) registry.lookup("RegionService");
+                
+                // 缓存服务
+                serviceCache.put(key, service);
+                return service;
+            } catch (Exception e) {
+                retryCount--;
+                if (retryCount == 0) {
+                    throw e;
+                }
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
+        throw new RemoteException("无法连接到RegionServer: " + hostAndPort);
     }
     
     /**

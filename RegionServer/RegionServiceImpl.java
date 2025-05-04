@@ -610,10 +610,11 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
     /**
      * 表存储类，管理表的数据和索引
      */
-    private class TableStorage {
+    private static class TableStorage implements Serializable {
+        private static final long serialVersionUID = 1L;
         private String tableName;
-        private File dataFile;
-        private Map<String, File> indexFiles;
+        private transient File dataFile;
+        private transient Map<String, File> indexFiles;
         private List<Map<String, Object>> data; // 内存中的数据
         
         public TableStorage(String tableName) {
@@ -936,6 +937,9 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             return object;
         } catch (ClassNotFoundException e) {
             System.err.println("反序列化时未找到类: " + e.getMessage());
+            throw e;
+        } catch (IOException e) {
+            System.err.println("反序列化时IO错误: " + e.getMessage());
             throw e;
         }
     }
