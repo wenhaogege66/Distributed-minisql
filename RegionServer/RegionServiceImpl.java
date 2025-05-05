@@ -892,9 +892,46 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
                     String columnName = condition.getKey();
                     Object value = condition.getValue();
                     
-                    if (!row.containsKey(columnName) || !objectsEqual(row.get(columnName), value)) {
-                        match = false;
-                        break;
+                    // 处理范围查询条件
+                    if (columnName.endsWith("_range") && value instanceof Map) {
+                        String actualColumnName = columnName.substring(0, columnName.length() - 6); // 去掉"_range"后缀
+                        Map<String, Object> rangeValues = (Map<String, Object>) value;
+                        Object minValue = rangeValues.get("min");
+                        Object maxValue = rangeValues.get("max");
+                        
+                        if (!row.containsKey(actualColumnName)) {
+                            match = false;
+                            break;
+                        }
+                        
+                        Object rowValue = row.get(actualColumnName);
+                        // 比较范围
+                        if (rowValue instanceof Number && minValue instanceof Number && maxValue instanceof Number) {
+                            double rowNum = ((Number) rowValue).doubleValue();
+                            double minNum = ((Number) minValue).doubleValue();
+                            double maxNum = ((Number) maxValue).doubleValue();
+                            
+                            if (rowNum < minNum || rowNum > maxNum) {
+                                match = false;
+                                break;
+                            }
+                        } else {
+                            // 对于非数字类型，尝试字符串比较
+                            String rowStr = rowValue.toString();
+                            String minStr = minValue.toString();
+                            String maxStr = maxValue.toString();
+                            
+                            if (rowStr.compareTo(minStr) < 0 || rowStr.compareTo(maxStr) > 0) {
+                                match = false;
+                                break;
+                            }
+                        }
+                    } else {
+                        // 普通等值查询
+                        if (!row.containsKey(columnName) || !objectsEqual(row.get(columnName), value)) {
+                            match = false;
+                            break;
+                        }
                     }
                 }
                 

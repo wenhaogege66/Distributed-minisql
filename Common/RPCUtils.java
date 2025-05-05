@@ -47,7 +47,17 @@ public class RPCUtils {
         
         // 检查缓存
         if (serviceCache.containsKey(key)) {
-            return (RegionService) serviceCache.get(key);
+            try {
+                // 测试连接是否仍然有效
+                RegionService service = (RegionService) serviceCache.get(key);
+                service.heartbeat(); // 如果连接断开，会抛出异常
+                return service;
+            } catch (Exception e) {
+                // 连接不可用，从缓存中移除
+                System.err.println("缓存的RegionServer连接失效: " + hostAndPort);
+                serviceCache.remove(key);
+                // 继续尝试重新连接
+            }
         }
         
         // 解析主机名和端口
@@ -56,24 +66,36 @@ public class RPCUtils {
         int port = Integer.parseInt(parts[1]);
         
         int retryCount = 3;
+        int retryDelayMs = 1000; // 初始延迟1秒
+        
         while (retryCount > 0) {
             try {
                 // 获取服务
                 Registry registry = LocateRegistry.getRegistry(host, port);
                 RegionService service = (RegionService) registry.lookup("RegionService");
                 
-                // 缓存服务
-                serviceCache.put(key, service);
-                return service;
+                // 测试连接
+                if (service.heartbeat()) {
+                    // 缓存服务
+                    serviceCache.put(key, service);
+                    return service;
+                } else {
+                    throw new RemoteException("RegionServer连接测试失败");
+                }
             } catch (Exception e) {
                 retryCount--;
+                System.err.println("连接RegionServer " + hostAndPort + " 失败，剩余重试次数: " + retryCount);
+                
                 if (retryCount == 0) {
-                    throw e;
+                    throw new RemoteException("无法连接到RegionServer: " + hostAndPort, e);
                 }
                 try {
-                    Thread.sleep(1000);
+                    // 使用指数退避策略
+                    Thread.sleep(retryDelayMs);
+                    retryDelayMs *= 2; // 每次失败后将延迟时间加倍
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
+                    throw new RemoteException("连接RegionServer被中断", ie);
                 }
             }
         }

@@ -186,55 +186,196 @@ start-client.bat
 
 ### 高级功能测试
 
-1. **数据分片测试**
+1. **基本数据操作测试**
 
-   - 创建大量数据，观察其在不同 RegionServer 的分布
+首先创建一个测试表并执行基本操作：
 
-   ```sql
-   -- 创建测试表
-   CREATE TABLE shard_test (id int, data char(100), PRIMARY KEY(id));
+```sql
+-- 创建测试表
+CREATE TABLE basic_test (id INT,name CHAR(50),score FLOAT,PRIMARY KEY(id));
 
-   -- 插入多条数据（可以用脚本批量插入）
-   INSERT INTO shard_test (id, data) VALUES (1, 'test_data_1');
-   INSERT INTO shard_test (id, data) VALUES (2, 'test_data_2');
-   INSERT INTO shard_test (id, data) VALUES (3, 'test_data_3');
-   ...
-   INSERT INTO shard_test (id, data) VALUES (1000, 'test_data_1000');
+-- 创建索引
+CREATE INDEX idx_name ON basic_test (name);
 
-   -- 检查数据分布（需要管理员命令或查看数据文件）
-   ```
+-- 插入数据
+INSERT INTO basic_test (id, name, score) VALUES (1, 'Alice', 85.5);
+INSERT INTO basic_test (id, name, score) VALUES (2, 'Bob', 92.0);
+INSERT INTO basic_test (id, name, score) VALUES (3, 'Charlie', 78.5);
 
-2. **负载均衡测试**
+-- 查询数据
+SELECT * FROM basic_test;
+SELECT name, score FROM basic_test WHERE id > 1;
 
-   - 启动多个 RegionServer，创建多个表并插入数据
-   - 使用系统监控工具观察各 RegionServer 负载
+-- 更新数据
+UPDATE basic_test SET score = 88.0 WHERE id = 1;
 
-3. **容错与恢复测试**
+-- 删除数据
+DELETE FROM basic_test WHERE id = 3;
 
-   ```
-   -- 准备工作：创建表并插入数据
-   CREATE TABLE fault_test (id int, name char(20), PRIMARY KEY(id));
-   INSERT INTO fault_test (id, name) VALUES (1, 'Test1');
-   INSERT INTO fault_test (id, name) VALUES (2, 'Test2');
+-- 验证操作结果
+SELECT * FROM basic_test;
+```
 
-   -- 测试RegionServer故障恢复：
-   1. 记录当前数据所在RegionServer
-   2. 关闭该RegionServer（结束进程）
-   3. 等待系统自动恢复
-   4. 查询数据验证可用性
-   SELECT * FROM fault_test;
-   ```
+2. **分片测试**
 
-4. **数据复制测试**
+通过大量数据测试系统的分片功能（需要启动多个 RegionServer）：
 
-   ```
-   -- 准备工作：确保至少有两个RegionServer运行
+```sql
+-- 创建用于分片测试的表
+CREATE TABLE shard_test (id INT,data CHAR(200),PRIMARY KEY(id));
+```
 
-   -- 测试数据复制：
-   1. 创建表并插入数据
-   2. 查看数据复制状态（需要管理员命令）
-   3. 关闭主要RegionServer，验证数据仍可访问
-   ```
+将以下代码保存为 `insert_data.sql` 文件：
+
+```sql
+-- 插入大量数据用于测试分片
+INSERT INTO shard_test (id, data) VALUES (1, 'test_data_1');
+INSERT INTO shard_test (id, data) VALUES (2, 'test_data_2');
+INSERT INTO shard_test (id, data) VALUES (3, 'test_data_3');
+-- 继续插入更多数据...
+INSERT INTO shard_test (id, data) VALUES (100, 'test_data_100');
+```
+
+使用 source 命令执行批量插入：
+
+```
+source insert_data.sql
+```
+
+验证数据分布（注意观察多个 RegionServer 的日志）：
+
+```sql
+-- 查询总数据量
+SELECT COUNT(*) FROM shard_test;
+SELECT * FROM shard_test;
+
+-- 范围查询验证分片
+SELECT * FROM shard_test WHERE id BETWEEN 1 AND 20;
+SELECT * FROM shard_test WHERE id BETWEEN 21 AND 40;
+```
+
+1. **故障恢复测试**
+
+测试 RegionServer 故障恢复机制：
+
+1. 确保至少启动了两个 RegionServer（例如端口 9000 和 9001）
+2. 创建测试表并插入数据
+
+```sql
+CREATE TABLE fault_test (id INT,info CHAR(100),PRIMARY KEY(id));
+
+INSERT INTO fault_test (id, info) VALUES (1, 'test_recovery_1');
+INSERT INTO fault_test (id, info) VALUES (2, 'test_recovery_2');
+INSERT INTO fault_test (id, info) VALUES (3, 'test_recovery_3');
+```
+
+3. 查询现有 RegionServer
+
+```
+servers
+```
+
+4. 停止其中一个 RegionServer（关闭进程）
+5. 等待几秒钟，允许 Master 检测到故障
+6. 再次查询数据，验证是否仍能访问
+
+```sql
+SELECT * FROM fault_test;
+```
+
+4. **性能测试**
+
+将以下代码保存为 `performance_test.sql` 文件：
+
+```sql
+-- 创建测试表
+CREATE TABLE perf_test (
+    id INT,
+    data CHAR(500),
+    PRIMARY KEY(id)
+);
+
+-- 插入测试数据（大量数据）
+INSERT INTO perf_test (id, data) VALUES (1, REPEAT('a', 500));
+-- 循环插入更多记录
+-- 注意：这里简化了SQL插入，实际测试中可以使用脚本生成更多数据
+INSERT INTO perf_test (id, data) VALUES (2, REPEAT('b', 500));
+INSERT INTO perf_test (id, data) VALUES (3, REPEAT('c', 500));
+-- ...以此类推插入更多数据
+
+-- 测试查询性能
+SELECT COUNT(*) FROM perf_test;
+SELECT * FROM perf_test WHERE id BETWEEN 1 AND 50;
+```
+
+运行性能测试脚本：
+
+```
+source performance_test.sql
+```
+
+5. **复杂查询测试**
+
+将以下代码保存为 `complex_queries.sql` 文件：
+
+```sql
+-- 创建测试表
+CREATE TABLE users (
+    user_id INT,
+    username CHAR(50),
+    age INT,
+    PRIMARY KEY(user_id)
+);
+
+CREATE TABLE orders (
+    order_id INT,
+    user_id INT,
+    amount FLOAT,
+    PRIMARY KEY(order_id)
+);
+
+-- 插入测试数据
+INSERT INTO users (user_id, username, age) VALUES (1, 'user1', 25);
+INSERT INTO users (user_id, username, age) VALUES (2, 'user2', 30);
+INSERT INTO users (user_id, username, age) VALUES (3, 'user3', 35);
+
+INSERT INTO orders (order_id, user_id, amount) VALUES (101, 1, 199.99);
+INSERT INTO orders (order_id, user_id, amount) VALUES (102, 1, 99.50);
+INSERT INTO orders (order_id, user_id, amount) VALUES (103, 2, 149.99);
+
+-- 复杂查询测试
+-- 注意：根据系统支持的SQL特性可能需要调整查询
+SELECT u.username, COUNT(o.order_id) AS order_count
+FROM users u, orders o
+WHERE u.user_id = o.user_id
+GROUP BY u.username;
+
+-- 聚合函数测试
+SELECT MAX(amount), MIN(amount), AVG(amount) FROM orders;
+
+-- 条件查询
+SELECT * FROM orders WHERE amount > 100;
+```
+
+运行复杂查询测试：
+
+```
+source complex_queries.sql
+```
+
+## 系统监控
+
+在测试过程中，可以通过以下命令监控系统状态：
+
+```
+-- 查看所有RegionServer
+servers
+
+-- 查看所有表
+tables
+```
+
+注意观察 Master 和 RegionServer 的日志输出，以验证系统行为是否符合预期。
 
 ## 系统管理命令
 
