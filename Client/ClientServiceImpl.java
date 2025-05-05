@@ -6,6 +6,9 @@ import Common.RPCUtils;
 import Master.MasterService;
 import RegionServer.RegionService;
 
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
@@ -72,12 +75,643 @@ public class ClientServiceImpl implements ClientService {
                 return Message.createSuccessResponse("client", "user");
             } else if (sql.toUpperCase().startsWith("UPDATE")) {
                 return executeUpdate(sql);
+            } else if (sql.toUpperCase().startsWith("SOURCE")) {
+                return executeSourceFile(sql);
+            } else if (sql.toUpperCase().startsWith("IMPORT")) {
+                return executeImportData(sql);
+            } else if (sql.toUpperCase().startsWith("DESCRIBE") || sql.toUpperCase().startsWith("DESC")) {
+                return executeDescribe(sql);
+            } else if (sql.toUpperCase().startsWith("SHOW SHARDS")) {
+                return executeShowShards(sql);
+            } else if (sql.toUpperCase().startsWith("SHOW SERVERS")) {
+                return executeShowServers();
             } else {
                 return Message.createErrorResponse("client", "user", "不支持的SQL语句: " + sql);
             }
         } catch (Exception e) {
             e.printStackTrace();
             return Message.createErrorResponse("client", "user", "执行SQL失败: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 执行从文件导入SQL语句命令
+     */
+    private Message executeSourceFile(String sql) {
+        try {
+            // 解析文件路径
+            String filePath = sql.substring("SOURCE".length()).trim();
+            
+            // 去掉可能存在的引号
+            if ((filePath.startsWith("\"") && filePath.endsWith("\"")) || 
+                (filePath.startsWith("'") && filePath.endsWith("'"))) {
+                filePath = filePath.substring(1, filePath.length() - 1);
+            }
+            
+            // 检查文件是否存在
+            File file = new File(filePath);
+            if (!file.exists() || !file.isFile()) {
+                return Message.createErrorResponse("client", "user", "文件不存在：" + filePath);
+            }
+            
+            // 读取文件内容
+            List<String> sqlStatements = new ArrayList<>();
+            try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+                StringBuilder currentSql = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    line = line.trim();
+                    
+                    // 跳过空行和注释
+                    if (line.isEmpty() || line.startsWith("--") || line.startsWith("#")) {
+                        continue;
+                    }
+                    
+                    currentSql.append(" ").append(line);
+                    
+                    // 如果行以分号结尾，则认为是一条完整的SQL语句
+                    if (line.endsWith(";")) {
+                        sqlStatements.add(currentSql.toString().trim());
+                        currentSql = new StringBuilder();
+                    }
+                }
+                
+                // 处理最后一条可能没有分号的语句
+                if (currentSql.length() > 0) {
+                    sqlStatements.add(currentSql.toString().trim());
+                }
+            }
+            
+            // 依次执行所有SQL语句
+            List<String> results = new ArrayList<>();
+            int successCount = 0;
+            
+            for (String stmt : sqlStatements) {
+                Message result = executeSql(stmt);
+                if (result.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
+                    successCount++;
+                    results.add("执行成功: " + stmt);
+                } else {
+                    String errorMsg = result.getData("error") != null ? result.getData("error").toString() : "未知错误";
+                    results.add("执行失败: " + stmt + " - " + errorMsg);
+                }
+            }
+            
+            // 输出执行结果
+            for (String result : results) {
+                System.out.println(result);
+            }
+            
+            // 返回执行概要
+            Message response = Message.createSuccessResponse("client", "user");
+            response.setData("message", "从文件执行SQL语句完成，成功: " + successCount + "/" + sqlStatements.size());
+            return response;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return Message.createErrorResponse("client", "user", "执行SOURCE命令失败: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 执行数据导入命令
+     */
+    private Message executeImportData(String sql) {
+        try {
+            // 解析导入命令: IMPORT [CSV|JSON] 'file_path' INTO table_name
+            Pattern pattern = Pattern.compile("IMPORT\\s+(CSV|JSON)\\s+['\"](.+)['\"]\\s+INTO\\s+(\\w+)\\s*;?", Pattern.CASE_INSENSITIVE);
+            Matcher matcher = pattern.matcher(sql);
+            
+            if (!matcher.find()) {
+                return Message.createErrorResponse("client", "user", "导入语法错误: " + sql + 
+                    ", 正确格式: IMPORT [CSV|JSON] 'file_path' INTO table_name");
+            }
+            
+            String format = matcher.group(1).toUpperCase();
+            String filePath = matcher.group(2);
+            String tableName = matcher.group(3);
+            
+            // 检查文件是否存在
+            File file = new File(filePath);
+            if (!file.exists() || !file.isFile()) {
+                return Message.createErrorResponse("client", "user", "文件不存在：" + filePath);
+            }
+            
+            // 导入数据
+            List<Map<String, Object>> dataList;
+            if ("CSV".equals(format)) {
+                dataList = importFromCsv(file);
+            } else if ("JSON".equals(format)) {
+                dataList = importFromJson(file);
+            } else {
+                return Message.createErrorResponse("client", "user", "不支持的导入格式: " + format);
+            }
+            
+            // 获取表结构信息，验证数据是否符合要求
+            List<Metadata.TableInfo> tables = getAllTables();
+            Metadata.TableInfo tableInfo = null;
+            
+            for (Metadata.TableInfo table : tables) {
+                if (table.getTableName().equals(tableName)) {
+                    tableInfo = table;
+                    break;
+                }
+            }
+            
+            if (tableInfo == null) {
+                return Message.createErrorResponse("client", "user", "表不存在: " + tableName);
+            }
+            
+            // 验证和插入数据
+            int successCount = 0;
+            List<String> errors = new ArrayList<>();
+            
+            for (Map<String, Object> data : dataList) {
+                try {
+                    Message result = insert(tableName, data);
+                    if (result.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
+                        successCount++;
+                    } else {
+                        String errorMsg = result.getData("error") != null ? result.getData("error").toString() : "未知错误";
+                        errors.add("导入行" + (successCount + errors.size() + 1) + "失败: " + errorMsg);
+                    }
+                } catch (Exception e) {
+                    errors.add("导入行" + (successCount + errors.size() + 1) + "失败: " + e.getMessage());
+                }
+            }
+            
+            // 输出错误信息
+            for (String error : errors) {
+                System.out.println(error);
+            }
+            
+            // 返回导入结果
+            Message response = Message.createSuccessResponse("client", "user");
+            response.setData("message", "导入数据完成，成功: " + successCount + "/" + dataList.size());
+            if (!errors.isEmpty()) {
+                response.setData("errors", errors);
+            }
+            
+            return response;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return Message.createErrorResponse("client", "user", "导入数据失败: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 从CSV文件导入数据
+     */
+    private List<Map<String, Object>> importFromCsv(File file) throws IOException {
+        List<Map<String, Object>> dataList = new ArrayList<>();
+        
+        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+            // 读取表头
+            String headerLine = reader.readLine();
+            if (headerLine == null) {
+                return dataList; // 空文件
+            }
+            
+            // 分割表头，获取列名
+            String[] headers = headerLine.split(",");
+            for (int i = 0; i < headers.length; i++) {
+                headers[i] = headers[i].trim();
+            }
+            
+            // 读取数据行
+            String line;
+            int lineNumber = 1; // 已读取表头
+            
+            while ((line = reader.readLine()) != null) {
+                lineNumber++;
+                line = line.trim();
+                if (line.isEmpty()) {
+                    continue; // 跳过空行
+                }
+                
+                // 解析CSV行，处理引号等特殊情况
+                String[] values = parseCSVLine(line);
+                
+                if (values.length != headers.length) {
+                    System.out.println("警告: 行 " + lineNumber + " 的列数 (" + values.length + 
+                        ") 与表头列数 (" + headers.length + ") 不匹配");
+                    continue; // 跳过不匹配的行
+                }
+                
+                // 构建数据记录
+                Map<String, Object> record = new HashMap<>();
+                for (int i = 0; i < headers.length; i++) {
+                    String value = values[i].trim();
+                    
+                    // 尝试转换为适当的数据类型
+                    Object parsedValue = parseValue(value);
+                    record.put(headers[i], parsedValue);
+                }
+                
+                dataList.add(record);
+            }
+        }
+        
+        return dataList;
+    }
+    
+    /**
+     * 解析CSV行，处理引号等特殊情况
+     */
+    private String[] parseCSVLine(String line) {
+        List<String> values = new ArrayList<>();
+        boolean inQuotes = false;
+        StringBuilder currentValue = new StringBuilder();
+        
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            
+            if (c == '"') {
+                // 处理引号
+                if (inQuotes) {
+                    // 检查是否是转义的引号 (""表示一个引号)
+                    if (i + 1 < line.length() && line.charAt(i + 1) == '"') {
+                        currentValue.append('"');
+                        i++; // 跳过下一个引号
+                    } else {
+                        inQuotes = false;
+                    }
+                } else {
+                    inQuotes = true;
+                }
+            } else if (c == ',' && !inQuotes) {
+                // 找到字段分隔符，当前值结束
+                values.add(currentValue.toString());
+                currentValue = new StringBuilder();
+            } else {
+                // 普通字符，添加到当前值
+                currentValue.append(c);
+            }
+        }
+        
+        // 添加最后一个值
+        values.add(currentValue.toString());
+        
+        return values.toArray(new String[0]);
+    }
+    
+    /**
+     * 从JSON文件导入数据
+     */
+    private List<Map<String, Object>> importFromJson(File file) throws IOException {
+        // 读取整个文件内容
+        String content = new String(Files.readAllBytes(Paths.get(file.getPath())));
+        
+        // 简单解析JSON，假设文件格式为 [{...}, {...}, ...]
+        List<Map<String, Object>> dataList = new ArrayList<>();
+        
+        // 去掉开头和结尾的方括号
+        content = content.trim();
+        if (content.startsWith("[")) {
+            content = content.substring(1);
+        }
+        if (content.endsWith("]")) {
+            content = content.substring(0, content.length() - 1);
+        }
+        
+        // 分割JSON对象
+        List<String> jsonObjects = splitJsonObjects(content);
+        
+        for (String jsonObject : jsonObjects) {
+            Map<String, Object> record = parseJsonObject(jsonObject);
+            if (!record.isEmpty()) {
+                dataList.add(record);
+            }
+        }
+        
+        return dataList;
+    }
+    
+    /**
+     * 分割JSON对象字符串
+     */
+    private List<String> splitJsonObjects(String content) {
+        List<String> objects = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        int braceCount = 0;
+        boolean inString = false;
+        
+        for (int i = 0; i < content.length(); i++) {
+            char c = content.charAt(i);
+            
+            if (c == '"' && (i == 0 || content.charAt(i - 1) != '\\')) {
+                // 处理字符串边界
+                inString = !inString;
+            }
+            
+            if (!inString) {
+                if (c == '{') {
+                    braceCount++;
+                } else if (c == '}') {
+                    braceCount--;
+                } else if (c == ',' && braceCount == 0) {
+                    // 对象之间的分隔符
+                    if (current.length() > 0) {
+                        objects.add(current.toString().trim());
+                        current = new StringBuilder();
+                    }
+                    continue;
+                }
+            }
+            
+            current.append(c);
+            
+            // 完成一个对象
+            if (braceCount == 0 && current.length() > 0 && current.charAt(0) == '{' && current.charAt(current.length() - 1) == '}') {
+                objects.add(current.toString().trim());
+                current = new StringBuilder();
+            }
+        }
+        
+        // 处理最后一个对象
+        if (current.length() > 0) {
+            objects.add(current.toString().trim());
+        }
+        
+        return objects;
+    }
+    
+    /**
+     * 解析单个JSON对象
+     */
+    private Map<String, Object> parseJsonObject(String jsonObject) {
+        Map<String, Object> result = new HashMap<>();
+        
+        // 去掉开头和结尾的花括号
+        jsonObject = jsonObject.trim();
+        if (jsonObject.startsWith("{")) {
+            jsonObject = jsonObject.substring(1);
+        }
+        if (jsonObject.endsWith("}")) {
+            jsonObject = jsonObject.substring(0, jsonObject.length() - 1);
+        }
+        
+        // 分割键值对
+        List<String> keyValuePairs = splitJsonKeyValuePairs(jsonObject);
+        
+        for (String pair : keyValuePairs) {
+            String[] parts = pair.split(":", 2);
+            if (parts.length == 2) {
+                // 提取键（去掉引号）
+                String key = parts[0].trim();
+                if (key.startsWith("\"") && key.endsWith("\"")) {
+                    key = key.substring(1, key.length() - 1);
+                }
+                
+                // 提取值（去掉引号，如果是字符串）
+                String valueStr = parts[1].trim();
+                Object value;
+                
+                if (valueStr.startsWith("\"") && valueStr.endsWith("\"")) {
+                    // 字符串值
+                    value = valueStr.substring(1, valueStr.length() - 1);
+                } else if (valueStr.equals("null")) {
+                    // null值
+                    value = null;
+                } else if (valueStr.equals("true") || valueStr.equals("false")) {
+                    // 布尔值
+                    value = Boolean.parseBoolean(valueStr);
+                } else {
+                    // 尝试解析为数字
+                    try {
+                        if (valueStr.contains(".")) {
+                            value = Double.parseDouble(valueStr);
+                        } else {
+                            value = Integer.parseInt(valueStr);
+                        }
+                    } catch (NumberFormatException e) {
+                        // 不是数字，保持原样
+                        value = valueStr;
+                    }
+                }
+                
+                result.put(key, value);
+            }
+        }
+        
+        return result;
+    }
+    
+    /**
+     * 分割JSON对象中的键值对
+     */
+    private List<String> splitJsonKeyValuePairs(String content) {
+        List<String> pairs = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inString = false;
+        int braceCount = 0;
+        int bracketCount = 0;
+        
+        for (int i = 0; i < content.length(); i++) {
+            char c = content.charAt(i);
+            
+            if (c == '"' && (i == 0 || content.charAt(i - 1) != '\\')) {
+                // 处理字符串边界
+                inString = !inString;
+            }
+            
+            if (!inString) {
+                if (c == '{') {
+                    braceCount++;
+                } else if (c == '}') {
+                    braceCount--;
+                } else if (c == '[') {
+                    bracketCount++;
+                } else if (c == ']') {
+                    bracketCount--;
+                } else if (c == ',' && braceCount == 0 && bracketCount == 0) {
+                    // 键值对之间的分隔符
+                    pairs.add(current.toString().trim());
+                    current = new StringBuilder();
+                    continue;
+                }
+            }
+            
+            current.append(c);
+        }
+        
+        // 处理最后一个键值对
+        if (current.length() > 0) {
+            pairs.add(current.toString().trim());
+        }
+        
+        return pairs;
+    }
+    
+    /**
+     * 执行DESCRIBE命令
+     */
+    private Message executeDescribe(String sql) throws RemoteException {
+        // 解析DESCRIBE命令
+        Pattern pattern = Pattern.compile("(DESCRIBE|DESC)\\s+(\\w+)\\s*;?", Pattern.CASE_INSENSITIVE);
+        Matcher matcher = pattern.matcher(sql);
+        
+        if (!matcher.find()) {
+            return Message.createErrorResponse("client", "user", "语法错误: " + sql);
+        }
+        
+        String tableName = matcher.group(2);
+        
+        // 获取表信息
+        List<Metadata.TableInfo> tables = getAllTables();
+        Metadata.TableInfo tableInfo = null;
+        
+        for (Metadata.TableInfo table : tables) {
+            if (table.getTableName().equals(tableName)) {
+                tableInfo = table;
+                break;
+            }
+        }
+        
+        if (tableInfo == null) {
+            return Message.createErrorResponse("client", "user", "表不存在: " + tableName);
+        }
+        
+        // 打印表结构
+        System.out.println("表名: " + tableInfo.getTableName());
+        System.out.println("主键: " + tableInfo.getPrimaryKey());
+        System.out.println();
+        
+        System.out.println("列名\t\t类型\t\t可空\t\t唯一");
+        System.out.println("----------------------------------------");
+        
+        for (Metadata.ColumnInfo column : tableInfo.getColumns()) {
+            System.out.println(column.getColumnName() + "\t\t" + 
+                               column.getDataType() + "\t\t" + 
+                               (!column.isNotNull() ? "是" : "否") + "\t\t" + 
+                               (column.isUnique() ? "是" : "否"));
+        }
+        
+        System.out.println();
+        System.out.println("索引:");
+        if (tableInfo.getIndexes().isEmpty()) {
+            System.out.println("  (无)");
+        } else {
+            for (Metadata.IndexInfo index : tableInfo.getIndexes()) {
+                System.out.println("  " + index.getIndexName() + " (" + index.getColumnName() + 
+                                 (index.isUnique() ? ", 唯一" : "") + ")");
+            }
+        }
+        
+        return Message.createSuccessResponse("client", "user");
+    }
+    
+    /**
+     * 执行SHOW SHARDS命令
+     */
+    private Message executeShowShards(String sql) throws RemoteException {
+        // 解析SHOW SHARDS命令
+        Pattern pattern = Pattern.compile("SHOW\\s+SHARDS\\s+(\\w+)\\s*;?", Pattern.CASE_INSENSITIVE);
+        Matcher matcher = pattern.matcher(sql);
+        
+        if (!matcher.find()) {
+            return Message.createErrorResponse("client", "user", "语法错误: " + sql);
+        }
+        
+        String tableName = matcher.group(1);
+        
+        // 获取表信息
+        List<Metadata.TableInfo> tables = getAllTables();
+        boolean tableExists = false;
+        
+        for (Metadata.TableInfo table : tables) {
+            if (table.getTableName().equals(tableName)) {
+                tableExists = true;
+                break;
+            }
+        }
+        
+        if (!tableExists) {
+            return Message.createErrorResponse("client", "user", "表不存在: " + tableName);
+        }
+        
+        // 获取表的分片信息
+        List<String> shards = masterService.getTableRegions(tableName);
+        
+        System.out.println("表 " + tableName + " 的分片情况:");
+        System.out.println("----------------------------------------");
+        
+        if (shards.isEmpty()) {
+            System.out.println("无分片信息");
+        } else {
+            int idx = 1;
+            for (String server : shards) {
+                System.out.println("分片 #" + idx + ": " + server);
+                idx++;
+            }
+        }
+        
+        return Message.createSuccessResponse("client", "user");
+    }
+    
+    /**
+     * 执行SHOW SERVERS命令
+     */
+    private Message executeShowServers() throws RemoteException {
+        try {
+            // 获取所有RegionServer
+            List<String> servers = getAllRegionServers();
+            
+            System.out.println("RegionServer状态:");
+            System.out.println("----------------------------------------");
+            
+            if (servers.isEmpty()) {
+                System.out.println("无RegionServer信息");
+            } else {
+                int idx = 1;
+                for (String server : servers) {
+                    // 获取RegionServer状态
+                    RegionService regionService = RPCUtils.getRegionService(server);
+                    Map<String, Object> status = new HashMap<>();
+                    
+                    try {
+                        if (regionService != null) {
+                            status = regionService.getStatus();
+                        }
+                    } catch (Exception e) {
+                        System.err.println("获取RegionServer状态失败: " + e.getMessage());
+                    }
+                    
+                    System.out.println("RegionServer #" + idx + ": " + server);
+                    if (!status.isEmpty()) {
+                        long uptime = status.containsKey("uptime") ? (long)status.get("uptime") : 0;
+                        int tableCount = status.containsKey("tableCount") ? (int)status.get("tableCount") : 0;
+                        System.out.println("  运行时间: " + formatUptime(uptime) + ", 表数量: " + tableCount);
+                    } else {
+                        System.out.println("  状态: 未知");
+                    }
+                    idx++;
+                }
+            }
+            
+            return Message.createSuccessResponse("client", "user");
+        } catch (Exception e) {
+            e.printStackTrace();
+            return Message.createErrorResponse("client", "user", "获取RegionServer信息失败: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 格式化运行时间
+     */
+    private String formatUptime(long millis) {
+        long seconds = millis / 1000;
+        long minutes = seconds / 60;
+        long hours = minutes / 60;
+        long days = hours / 24;
+        
+        if (days > 0) {
+            return days + "天 " + (hours % 24) + "小时";
+        } else if (hours > 0) {
+            return hours + "小时 " + (minutes % 60) + "分钟";
+        } else if (minutes > 0) {
+            return minutes + "分钟 " + (seconds % 60) + "秒";
+        } else {
+            return seconds + "秒";
         }
     }
     

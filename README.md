@@ -235,3 +235,61 @@ start-client.bat
    2. 查看数据复制状态（需要管理员命令）
    3. 关闭主要RegionServer，验证数据仍可访问
    ```
+
+## 系统管理命令
+
+可使用以下命令进行系统管理：
+
+### 表结构查看
+
+```
+DESCRIBE tablename;   # 或使用简写形式: DESC tablename;
+```
+
+显示表的结构，包括列名、数据类型、约束和索引信息。
+
+### 分片信息查看
+
+```
+SHOW SHARDS tablename;
+```
+
+显示表的分片情况，包括所有存储该表的 RegionServer 节点。
+
+### 服务器状态查看
+
+```
+SHOW SERVERS;
+```
+
+显示所有 RegionServer 的状态，包括运行时间和表数量等信息。
+
+## 批量数据操作
+
+### 批量 SQL 执行
+
+```
+SOURCE sqlfile.sql;
+```
+
+从指定的 SQL 文件中批量执行 SQL 语句。SQL 文件中的每条语句应以分号结尾。
+
+### 数据导入
+
+```
+IMPORT CSV 'filename.csv' INTO tablename;
+IMPORT JSON 'filename.json' INTO tablename;
+```
+
+支持从 CSV 或 JSON 文件导入数据到指定表中。
+
+- CSV 文件格式：第一行为列名，后续每行为数据记录
+- JSON 文件格式：包含对象数组，每个对象代表一条记录
+
+## 示例文件
+
+系统在 samples 目录中提供了示例数据文件供参考：
+
+- `samples/sample.csv`：CSV 格式的示例数据
+- `samples/sample.json`：JSON 格式的示例数据
+- `samples/sample.sql`：批量 SQL 执行的示例文件
