@@ -275,7 +275,9 @@ public class ClientServiceImpl implements ClientService {
                         value = value.substring(1, value.length() - 1);
                     }
                     
-                    data.put(column, value);
+                    // 转换为适当的数据类型
+                    Object parsedValue = parseValue(value);
+                    data.put(column, parsedValue);
                 }
                 
                 // 调用RegionServer插入数据
@@ -326,7 +328,9 @@ public class ClientServiceImpl implements ClientService {
                         value = value.substring(1, value.length() - 1);
                     }
                     
-                    data.put(columnName, value);
+                    // 转换为适当的数据类型
+                    Object parsedValue = parseValue(value);
+                    data.put(columnName, parsedValue);
                 }
                 
                 // 调用RegionServer插入数据
@@ -344,8 +348,13 @@ public class ClientServiceImpl implements ClientService {
      * 执行DELETE语句
      */
     private Message executeDelete(String sql) throws RemoteException {
+        // 去掉可能的分号
+        if (sql.endsWith(";")) {
+            sql = sql.substring(0, sql.length() - 1);
+        }
+        
         // 解析DELETE语句
-        Pattern pattern = Pattern.compile("DELETE\\s+FROM\\s+(\\w+)(?:\\s+WHERE\\s+(.+?))?;?", Pattern.CASE_INSENSITIVE);
+        Pattern pattern = Pattern.compile("DELETE\\s+FROM\\s+(\\w+)(\\s+WHERE\\s+(.+))?", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
         Matcher matcher = pattern.matcher(sql);
         
         if (!matcher.find()) {
@@ -353,7 +362,7 @@ public class ClientServiceImpl implements ClientService {
         }
         
         String tableName = matcher.group(1);
-        String whereClause = matcher.group(2);
+        String whereClause = matcher.group(3); // 注意这里用group(3)，因为group(2)包含了WHERE关键字
         
         // 解析WHERE条件
         Map<String, Object> conditions = new HashMap<>();
@@ -373,7 +382,9 @@ public class ClientServiceImpl implements ClientService {
                         value = value.substring(1, value.length() - 1);
                     }
                     
-                    conditions.put(column, value);
+                    // 尝试转换为数值类型
+                    Object parsedValue = parseValue(value);
+                    conditions.put(column, parsedValue);
                 }
             }
         }
@@ -425,7 +436,9 @@ public class ClientServiceImpl implements ClientService {
                         value = value.substring(1, value.length() - 1);
                     }
                     
-                    conditions.put(column, value);
+                    // 尝试转换为数值类型
+                    Object parsedValue = parseValue(value);
+                    conditions.put(column, parsedValue);
                 }
             }
         }
@@ -478,8 +491,13 @@ public class ClientServiceImpl implements ClientService {
      * 执行UPDATE语句
      */
     private Message executeUpdate(String sql) throws RemoteException {
-        // 解析UPDATE语句
-        Pattern pattern = Pattern.compile("UPDATE\\s+(\\w+)\\s+SET\\s+(.+?)(?:\\s+WHERE\\s+(.+?))?;?", Pattern.CASE_INSENSITIVE);
+        // 去掉可能的分号
+        if (sql.endsWith(";")) {
+            sql = sql.substring(0, sql.length() - 1);
+        }
+        
+        // 解析UPDATE语句 - 分两步：先提取表名和SET子句，再提取WHERE子句
+        Pattern pattern = Pattern.compile("UPDATE\\s+(\\w+)\\s+SET\\s+(.+?)(\\s+WHERE\\s+(.+))?$", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
         Matcher matcher = pattern.matcher(sql);
         
         if (!matcher.find()) {
@@ -488,7 +506,7 @@ public class ClientServiceImpl implements ClientService {
         
         String tableName = matcher.group(1);
         String setClause = matcher.group(2);
-        String whereClause = matcher.group(3);
+        String whereClause = matcher.group(4); // 注意这里用group(4)
         
         // 解析SET子句
         Map<String, Object> values = new HashMap<>();
@@ -507,7 +525,9 @@ public class ClientServiceImpl implements ClientService {
                     value = value.substring(1, value.length() - 1);
                 }
                 
-                values.put(column, value);
+                // 转换为适当的数据类型
+                Object parsedValue = parseValue(value);
+                values.put(column, parsedValue);
             }
         }
         
@@ -529,7 +549,9 @@ public class ClientServiceImpl implements ClientService {
                         value = value.substring(1, value.length() - 1);
                     }
                     
-                    conditions.put(column, value);
+                    // 尝试转换为数值类型
+                    Object parsedValue = parseValue(value);
+                    conditions.put(column, parsedValue);
                 }
             }
         }
@@ -721,5 +743,42 @@ public class ClientServiceImpl implements ClientService {
     private void updateTableRegions(String tableName) throws RemoteException {
         List<String> regions = masterService.getTableRegions(tableName);
         tableRegions.put(tableName, regions);
+    }
+    
+    /**
+     * 将字符串转换为相应的数据类型
+     */
+    private Object parseValue(String value) {
+        // 尝试转换为整数
+        try {
+            // 检查是否是整数格式
+            if (value.matches("-?\\d+")) {
+                Integer intValue = Integer.parseInt(value);
+                return intValue;
+            }
+        } catch (NumberFormatException e) {
+            // 无需打印异常信息
+        }
+        
+        // 尝试转换为浮点数
+        try {
+            // 检查是否是浮点数格式 (允许 1.0, .5, 5., -1.5 等格式)
+            if (value.matches("-?\\d*\\.\\d*") && !value.equals(".")) {
+                Float floatValue = Float.parseFloat(value);
+                return floatValue;
+            }
+        } catch (NumberFormatException e) {
+            // 无需打印异常信息
+        }
+        
+        // 检查布尔值
+        if (value.equalsIgnoreCase("true")) {
+            return Boolean.TRUE;
+        } else if (value.equalsIgnoreCase("false")) {
+            return Boolean.FALSE;
+        }
+        
+        // 无法转换，返回原始字符串
+        return value;
     }
 } 

@@ -196,6 +196,8 @@ start-client.bat
 
    -- 插入多条数据（可以用脚本批量插入）
    INSERT INTO shard_test (id, data) VALUES (1, 'test_data_1');
+   INSERT INTO shard_test (id, data) VALUES (2, 'test_data_2');
+   INSERT INTO shard_test (id, data) VALUES (3, 'test_data_3');
    ...
    INSERT INTO shard_test (id, data) VALUES (1000, 'test_data_1000');
 

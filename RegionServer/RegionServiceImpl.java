@@ -408,31 +408,89 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
                 return Message.createErrorResponse("region-" + hostname + ":" + port, "client", "表不存在: " + tableName);
             }
             
-            // 获取表存储
-            TableStorage tableStorage = tableStorages.get(tableName);
-            
             // 获取表元数据
             Metadata.TableInfo tableInfo = tableInfoCache.get(tableName);
             
+            // 转换数据类型以匹配表结构
+            Map<String, Object> convertedValues = convertValuesToMatchSchema(values, tableInfo);
+            
+            // 获取表存储
+            TableStorage tableStorage = tableStorages.get(tableName);
+            
             // 校验数据
-            String validationError = validateInsertData(tableInfo, values);
+            String validationError = validateInsertData(tableInfo, convertedValues);
             if (validationError != null) {
                 return Message.createErrorResponse("region-" + hostname + ":" + port, "client", validationError);
             }
             
             // 执行插入
-            boolean success = tableStorage.insert(values);
+            boolean success = tableStorage.insert(convertedValues);
             if (!success) {
                 return Message.createErrorResponse("region-" + hostname + ":" + port, "client", "插入数据失败");
             }
-            
-            System.out.println("成功插入数据到表: " + tableName);
             
             return Message.createSuccessResponse("region-" + hostname + ":" + port, "client");
         } catch (Exception e) {
             e.printStackTrace();
             return Message.createErrorResponse("region-" + hostname + ":" + port, "client", "插入数据失败: " + e.getMessage());
         }
+    }
+    
+    private Map<String, Object> convertValuesToMatchSchema(Map<String, Object> values, Metadata.TableInfo tableInfo) {
+        Map<String, Object> convertedValues = new HashMap<>();
+        
+        for (Map.Entry<String, Object> entry : values.entrySet()) {
+            String columnName = entry.getKey();
+            Object value = entry.getValue();
+            
+            // 查找列定义
+            Metadata.ColumnInfo columnInfo = null;
+            for (Metadata.ColumnInfo col : tableInfo.getColumns()) {
+                if (col.getColumnName().equals(columnName)) {
+                    columnInfo = col;
+                    break;
+                }
+            }
+            
+            if (columnInfo == null) {
+                // 列不存在，直接使用原值
+                convertedValues.put(columnName, value);
+                continue;
+            }
+            
+            // 根据列类型转换值
+            Object convertedValue = value;
+            Common.DataTypes.Type dataType = columnInfo.getDataType().getType();
+            
+            if (dataType == Common.DataTypes.Type.INT) {
+                // 转换为整数
+                if (value instanceof String) {
+                    try {
+                        convertedValue = Integer.parseInt((String) value);
+                    } catch (NumberFormatException e) {
+                        // 无需打印异常信息
+                    }
+                } else if (value instanceof Number) {
+                    convertedValue = ((Number) value).intValue();
+                }
+            } else if (dataType == Common.DataTypes.Type.FLOAT) {
+                // 转换为浮点数
+                if (value instanceof String) {
+                    try {
+                        convertedValue = Float.parseFloat((String) value);
+                    } catch (NumberFormatException e) {
+                        // 无需打印异常信息
+                    }
+                } else if (value instanceof Number) {
+                    convertedValue = ((Number) value).floatValue();
+                }
+            }
+            // 其他类型保持不变
+            
+            convertedValues.put(columnName, convertedValue);
+        }
+        
+        return convertedValues;
     }
     
     /**
@@ -461,6 +519,38 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             
             if (!columnFound) {
                 return "未知字段: " + columnName;
+            }
+        }
+        
+        // 检查主键约束
+        String primaryKey = tableInfo.getPrimaryKey();
+        if (primaryKey != null && values.containsKey(primaryKey)) {
+            Object primaryKeyValue = values.get(primaryKey);
+            
+            // 获取表存储
+            TableStorage tableStorage = tableStorages.get(tableInfo.getTableName());
+            if (tableStorage != null) {
+                // 检查主键是否已存在
+                if (tableStorage.isPrimaryKeyExists(primaryKey, primaryKeyValue)) {
+                    return "主键重复: " + primaryKey + " = " + primaryKeyValue;
+                }
+            }
+        }
+        
+        // 检查唯一性约束
+        for (Metadata.ColumnInfo column : tableInfo.getColumns()) {
+            if (column.isUnique() && values.containsKey(column.getColumnName())) {
+                String columnName = column.getColumnName();
+                Object value = values.get(columnName);
+                
+                // 获取表存储
+                TableStorage tableStorage = tableStorages.get(tableInfo.getTableName());
+                if (tableStorage != null) {
+                    // 检查唯一值是否已存在
+                    if (tableStorage.isUniqueValueExists(columnName, value)) {
+                        return "唯一性约束冲突: " + columnName + " = " + value;
+                    }
+                }
             }
         }
         
@@ -746,8 +836,13 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
          * 插入数据
          */
         public boolean insert(Map<String, Object> values) {
-            // 添加到内存数据
-            data.add(new HashMap<>(values));
+            // 添加到内存数据 - 使用深拷贝确保类型一致
+            Map<String, Object> newRow = new HashMap<>();
+            for (Map.Entry<String, Object> entry : values.entrySet()) {
+                newRow.put(entry.getKey(), entry.getValue());
+            }
+            
+            data.add(newRow);
             
             // 更新索引
             updateIndexes(values);
@@ -797,7 +892,7 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
                     String columnName = condition.getKey();
                     Object value = condition.getValue();
                     
-                    if (!row.containsKey(columnName) || !row.get(columnName).equals(value)) {
+                    if (!row.containsKey(columnName) || !objectsEqual(row.get(columnName), value)) {
                         match = false;
                         break;
                     }
@@ -847,7 +942,12 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
                     String columnName = condition.getKey();
                     Object value = condition.getValue();
                     
-                    if (!row.containsKey(columnName) || !objectsEqual(row.get(columnName), value)) {
+                    if (!row.containsKey(columnName)) {
+                        match = false;
+                        break;
+                    }
+                    
+                    if (!objectsEqual(row.get(columnName), value)) {
                         match = false;
                         break;
                     }
@@ -888,7 +988,12 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
                     String columnName = condition.getKey();
                     Object value = condition.getValue();
                     
-                    if (!row.containsKey(columnName) || !objectsEqual(row.get(columnName), value)) {
+                    if (!row.containsKey(columnName)) {
+                        match = false;
+                        break;
+                    }
+                    
+                    if (!objectsEqual(row.get(columnName), value)) {
                         match = false;
                         break;
                     }
@@ -896,7 +1001,9 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
                 
                 if (match) {
                     // 更新数据
-                    row.putAll(values);
+                    for (Map.Entry<String, Object> entry : values.entrySet()) {
+                        row.put(entry.getKey(), entry.getValue());
+                    }
                     count++;
                 }
             }
@@ -922,20 +1029,35 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
                 return false;
             }
             
-            // 如果两个对象类型相同，直接比较
+            // 直接尝试整数比较 - 这是最常见的主键类型
+            if (obj1 instanceof Integer || obj2 instanceof Integer) {
+                try {
+                    int val1 = (obj1 instanceof Integer) ? (Integer)obj1 : Integer.parseInt(obj1.toString());
+                    int val2 = (obj2 instanceof Integer) ? (Integer)obj2 : Integer.parseInt(obj2.toString());
+                    return val1 == val2;
+                } catch (Exception e) {
+                    // 失败则继续其他比较方式
+                }
+            }
+            
+            // 浮点数比较
+            if (obj1 instanceof Float || obj1 instanceof Double || 
+                obj2 instanceof Float || obj2 instanceof Double) {
+                try {
+                    double val1 = (obj1 instanceof Number) ? ((Number)obj1).doubleValue() : Double.parseDouble(obj1.toString());
+                    double val2 = (obj2 instanceof Number) ? ((Number)obj2).doubleValue() : Double.parseDouble(obj2.toString());
+                    return Math.abs(val1 - val2) < 0.0001;
+                } catch (Exception e) {
+                    // 失败则继续其他比较方式
+                }
+            }
+            
+            // 类型相同直接比较
             if (obj1.getClass() == obj2.getClass()) {
                 return obj1.equals(obj2);
             }
             
-            // 处理数值类型的比较
-            if (obj1 instanceof Number && obj2 instanceof Number) {
-                // 转换为 double 进行比较
-                double num1 = ((Number) obj1).doubleValue();
-                double num2 = ((Number) obj2).doubleValue();
-                return Math.abs(num1 - num2) < 0.0001; // 允许浮点数有小误差
-            }
-            
-            // 尝试字符串比较
+            // 最后尝试字符串比较
             return obj1.toString().equals(obj2.toString());
         }
         
@@ -944,6 +1066,36 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
          */
         public List<Map<String, Object>> getAllData() {
             return new ArrayList<>(data);
+        }
+        
+        /**
+         * 检查主键是否已存在
+         */
+        public boolean isPrimaryKeyExists(String primaryKeyColumn, Object primaryKeyValue) {
+            for (Map<String, Object> row : data) {
+                if (row.containsKey(primaryKeyColumn)) {
+                    Object existingValue = row.get(primaryKeyColumn);
+                    if (objectsEqual(existingValue, primaryKeyValue)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        
+        /**
+         * 检查唯一值是否已存在
+         */
+        public boolean isUniqueValueExists(String uniqueColumn, Object uniqueValue) {
+            for (Map<String, Object> row : data) {
+                if (row.containsKey(uniqueColumn)) {
+                    Object existingValue = row.get(uniqueColumn);
+                    if (objectsEqual(existingValue, uniqueValue)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
     }
     
