@@ -36,7 +36,7 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
     private Map<String, Object> serverStatus;
     
     // 数据文件根目录
-    private static final String DATA_ROOT_DIR = "data";
+    private String DATA_ROOT_DIR;
     
     private Master.MasterService masterService;
     
@@ -57,6 +57,9 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
         serverStatus.put("port", port);
         serverStatus.put("startTime", System.currentTimeMillis());
         serverStatus.put("tableCount", 0);
+        
+        // 从系统属性获取数据目录，如果没有则使用默认的"data"
+        DATA_ROOT_DIR = System.getProperty("region.data.dir", "data");
         
         // 创建数据目录
         File dataDir = new File(DATA_ROOT_DIR);

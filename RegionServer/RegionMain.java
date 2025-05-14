@@ -22,6 +22,10 @@ public class RegionMain {
             // 获取主机名
             String hostname = InetAddress.getLocalHost().getHostName();
             
+            // 设置区域数据目录
+            String dataDir = "region-" + port;
+            System.setProperty("region.data.dir", dataDir);
+            
             // 创建服务实例
             RegionServiceImpl regionService = new RegionServiceImpl(hostname, port);
             
@@ -32,6 +36,7 @@ public class RegionMain {
             registry.rebind("RegionService", regionService);
             
             System.out.println("RegionServer started on " + hostname + ":" + port);
+            System.out.println("Data directory: " + dataDir);
             
             // 添加关闭钩子
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {

@@ -70,6 +70,9 @@ public class ClientServiceImpl implements ClientService {
                 return executeInsert(sql);
             } else if (sql.toUpperCase().startsWith("DELETE FROM")) {
                 return executeDelete(sql);
+            } else if (sql.toUpperCase().startsWith("SELECT FROM SHARD")) {
+                executeSelectFromShard(sql);
+                return Message.createSuccessResponse("client", "user");
             } else if (sql.toUpperCase().startsWith("SELECT")) {
                 executeSelect(sql);
                 return Message.createSuccessResponse("client", "user");
@@ -1583,6 +1586,7 @@ public class ClientServiceImpl implements ClientService {
             // 尝试每个RegionServer，直到成功或全部失败
             List<String> unavailableServers = new ArrayList<>();
             Exception lastException = null;
+            List<Map<String, Object>> allResults = new ArrayList<>();
             
             for (String regionServer : servers) {
                 try {
@@ -1594,9 +1598,10 @@ public class ClientServiceImpl implements ClientService {
 
                         // 调用RegionServer查询数据
                         List<Map<String, Object>> result = regionService.select(tableName, columns, conditions);
-
-                        // 查询成功，返回结果
-                        return result;
+                        System.out.println("成功从表 " + tableName + " 查询 " + result.size() + " 条记录");
+                        
+                        // 将结果添加到总结果集
+                        allResults.addAll(result);
                     }
                 } catch (Exception e) {
                     unavailableServers.add(regionServer);
@@ -1621,7 +1626,8 @@ public class ClientServiceImpl implements ClientService {
                             if (!unavailableServers.contains(server)) {
                                 try {
                                     RegionService regionService = RPCUtils.getRegionService(server);
-                                    return regionService.select(tableName, columns, conditions);
+                                    List<Map<String, Object>> result = regionService.select(tableName, columns, conditions);
+                                    allResults.addAll(result);
                                 } catch (Exception e) {
                                     System.err.println("更新后的RegionServer " + server + " 查询失败: " + e.getMessage());
                                 }
@@ -1633,15 +1639,122 @@ public class ClientServiceImpl implements ClientService {
                 }
             }
             
-            // 如果到这里，说明所有尝试都失败了
-            if (lastException != null) {
-                System.err.println("查询数据失败: " + lastException.getMessage());
-            }
-            return new ArrayList<>();
+            return allResults;
         } catch (Exception e) {
             e.printStackTrace();
             System.err.println("查询数据失败: " + e.getMessage());
             return new ArrayList<>();
+        }
+    }
+
+    /**
+     * 执行SELECT FROM SHARD语句，从指定分片查询数据
+     */
+    private void executeSelectFromShard(String sql) throws RemoteException {
+        // 解析SELECT FROM SHARD语句
+        Pattern pattern = Pattern.compile("SELECT\\s+FROM\\s+SHARD\\s+(\\S+)\\s+(.+?)\\s+FROM\\s+(\\w+)(?:\\s+WHERE\\s+(.+?))?;?", 
+                                       Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+        Matcher matcher = pattern.matcher(sql);
+        
+        if (!matcher.find()) {
+            throw new RemoteException("SQL语法错误: " + sql + "\n正确语法: SELECT FROM SHARD <server:port> <columns> FROM <table> [WHERE <conditions>]");
+        }
+        
+        String shardServer = matcher.group(1);
+        String columnsStr = matcher.group(2);
+        String tableName = matcher.group(3);
+        String whereClause = matcher.group(4);
+        
+        // 解析列名
+        List<String> columns = new ArrayList<>();
+        boolean isCountQuery = false;
+        
+        // 检查是否是COUNT(*)查询
+        if (columnsStr.toUpperCase().contains("COUNT(*)")) {
+            isCountQuery = true;
+            columns = new ArrayList<>(); // 空列表表示查询所有列
+        } else if (!columnsStr.equals("*")) {
+            String[] columnParts = columnsStr.split(",");
+            for (String column : columnParts) {
+                columns.add(column.trim());
+            }
+        }
+        
+        // 解析WHERE条件
+        Map<String, Object> conditions = new HashMap<>();
+        if (whereClause != null) {
+            // 处理BETWEEN条件
+            Pattern betweenPattern = Pattern.compile("(\\w+)\\s+BETWEEN\\s+(\\S+)\\s+AND\\s+(\\S+)", Pattern.CASE_INSENSITIVE);
+            Matcher betweenMatcher = betweenPattern.matcher(whereClause);
+            
+            if (betweenMatcher.find()) {
+                String columnName = betweenMatcher.group(1).trim();
+                String minValue = betweenMatcher.group(2).trim();
+                String maxValue = betweenMatcher.group(3).trim();
+                
+                // 去掉引号
+                if (minValue.startsWith("'") && minValue.endsWith("'")) {
+                    minValue = minValue.substring(1, minValue.length() - 1);
+                }
+                if (maxValue.startsWith("'") && maxValue.endsWith("'")) {
+                    maxValue = maxValue.substring(1, maxValue.length() - 1);
+                }
+                
+                // 创建范围条件 (使用特殊格式标记为范围查询)
+                Map<String, Object> rangeCondition = new HashMap<>();
+                rangeCondition.put("min", parseValue(minValue));
+                rangeCondition.put("max", parseValue(maxValue));
+                conditions.put(columnName + "_range", rangeCondition);
+            } else {
+                // 处理普通条件
+                String[] conditionParts = whereClause.split("AND");
+                for (String condition : conditionParts) {
+                    condition = condition.trim();
+                    String[] parts = condition.split("=");
+                    if (parts.length == 2) {
+                        String column = parts[0].trim();
+                        String value = parts[1].trim();
+                        
+                        // 去掉引号
+                        if (value.startsWith("'") && value.endsWith("'")) {
+                            value = value.substring(1, value.length() - 1);
+                        } else if (value.startsWith("\"") && value.endsWith("\"")) {
+                            value = value.substring(1, value.length() - 1);
+                        }
+                        
+                        // 尝试转换为数值类型
+                        Object parsedValue = parseValue(value);
+                        conditions.put(column, parsedValue);
+                    }
+                }
+            }
+        }
+        
+        try {
+            // 直接连接到指定的RegionServer
+            RegionService regionService = RPCUtils.getRegionService(shardServer);
+            
+            if (regionService == null) {
+                System.out.println("无法连接到指定的RegionServer: " + shardServer);
+                return;
+            }
+            
+            // 调用RegionServer查询数据
+            List<Map<String, Object>> result = regionService.select(tableName, columns, conditions);
+            
+            // 处理COUNT(*)查询
+            if (isCountQuery) {
+                Map<String, Object> countResult = new HashMap<>();
+                countResult.put("COUNT(*)", result.size());
+                result = Collections.singletonList(countResult);
+            }
+            
+            // 打印结果
+            System.out.println("从分片 " + shardServer + " 查询结果:");
+            printResult(result);
+        } catch (Exception e) {
+            System.err.println("从分片 " + shardServer + " 查询失败: " + e.getMessage());
+            throw new RemoteException("查询失败: " + e.getMessage());
         }
     }
 } 

@@ -8,5 +8,5 @@ if not "%1"=="" (
 )
 
 REM 启动RegionServer服务
-java -cp ..\target\distributed-minisql-1.0-SNAPSHOT-jar-with-dependencies.jar RegionServer.RegionMain %PORT%
+java -cp ..\target\distributed-minisql-1.0-SNAPSHOT-jar-with-dependencies.jar RegionServer.RegionMain 9000
 pause 
