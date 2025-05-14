@@ -59,7 +59,7 @@ public class FailureDetector implements Watcher {
                 System.err.println("健康检查异常: " + e.getMessage());
                 e.printStackTrace();
             }
-        }, 10, 30, TimeUnit.SECONDS);
+        }, 10, 10, TimeUnit.SECONDS);
     }
     
     /**
@@ -189,23 +189,31 @@ public class FailureDetector implements Watcher {
                 return;
             }
             
-            // 从源RegionServer复制表数据到新RegionServer
-            boolean success = replicateTable(tableInfo, sourceServer, newServer);
-            
-            if (success) {
-                // 更新表区域信息
-                regionInfo.addRegionServer(newServer);
-                
+            // 如果源RegionServer和新RegionServer相同，则无需复制
+            if (!sourceServer.equals(newServer)) {
+                // 从源RegionServer复制表数据到新RegionServer
+                boolean success = replicateTable(tableInfo, sourceServer, newServer);
+
+                if (success) {
+                    // 更新表区域信息
+                    regionInfo.addRegionServer(newServer);
+
+                    // 更新ZooKeeper中的数据
+                    masterService.updateTableRegionInfo(tableName, regionInfo);
+
+                    // 更新serverLoads
+                    serverLoads.put(newServer, serverLoads.getOrDefault(newServer, 0) + 1);
+
+                    System.out.println("成功恢复表 " + tableName + " 从 " + sourceServer + " 到 " + newServer);
+                } else {
+                    System.err.println("复制表 " + tableName + " 从 " + sourceServer + " 到 " + newServer + " 失败");
+                }
+            } else {
                 // 更新ZooKeeper中的数据
                 masterService.updateTableRegionInfo(tableName, regionInfo);
-                
-                // 更新serverLoads
-                serverLoads.put(newServer, serverLoads.getOrDefault(newServer, 0) + 1);
-                
-                System.out.println("成功恢复表 " + tableName + " 从 " + sourceServer + " 到 " + newServer);
-            } else {
-                System.err.println("复制表 " + tableName + " 从 " + sourceServer + " 到 " + newServer + " 失败");
+                System.out.println(sourceServer + "已包含表" + tableName + "的副本");
             }
+
         } catch (Exception e) {
             System.err.println("恢复表 " + tableName + " 时出现异常: " + e.getMessage());
             e.printStackTrace();

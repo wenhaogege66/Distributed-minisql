@@ -61,6 +61,12 @@ public interface MasterService extends Remote {
      * @return RegionServer列表
      */
     List<String> getAllRegionServers() throws RemoteException;
+
+    /**
+     * 获取RegionServer状态
+     * @return RegionServer状态
+     */
+    Boolean getRegionServerStatus(String server) throws RemoteException;
     
     /**
      * 获取所有表信息

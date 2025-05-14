@@ -489,7 +489,18 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
     
     @Override
     public List<String> getAllRegionServers() throws RemoteException {
-        return new ArrayList<>(regionServers.keySet());
+        List<String> regions = new ArrayList<>();
+        for (String server : regionServers.keySet()) {
+            if (!regionServers.get(server).equals("failed")) {
+                regions.add(server);
+            }
+        }
+        return regions;
+    }
+
+    @Override
+    public Boolean getRegionServerStatus(String server) throws RemoteException {
+        return !regionServers.get(server).equals("failed");
     }
     
     @Override

@@ -1299,17 +1299,16 @@ public class ClientServiceImpl implements ClientService {
                 return Message.createErrorResponse("client", "user", "找不到表所在的RegionServer: " + tableName);
             }
             
-            // 尝试每个RegionServer，直到成功或全部失败
+            // 尝试每个RegionServer，直到全部成功或全部失败
             List<String> unavailableServers = new ArrayList<>();
             Exception lastException = null;
-            
+
+            boolean if_insert = false;
             for (String regionServer : servers) {
                 try {
                     RegionService regionService = RPCUtils.getRegionService(regionServer);
                     Message response = regionService.insert(tableName, values);
-                    
-                    // 插入成功，返回结果
-                    return response;
+                    if_insert = true;
                 } catch (Exception e) {
                     unavailableServers.add(regionServer);
                     lastException = e;
@@ -1318,6 +1317,11 @@ public class ClientServiceImpl implements ClientService {
                     // 从缓存中移除
                     RPCUtils.removeFromCache("region:" + regionServer);
                 }
+            }
+
+            if (if_insert) {
+                // 如果至少有一个region插入成功，返回结果
+                return Message.createSuccessResponse("regions", "client");
             }
             
             // 所有服务器都失败，尝试从Master更新表区域信息
@@ -1582,13 +1586,18 @@ public class ClientServiceImpl implements ClientService {
             
             for (String regionServer : servers) {
                 try {
-                    RegionService regionService = RPCUtils.getRegionService(regionServer);
-                    
-                    // 调用RegionServer查询数据
-                    List<Map<String, Object>> result = regionService.select(tableName, columns, conditions);
-                    
-                    // 查询成功，返回结果
-                    return result;
+                    if (!masterService.getRegionServerStatus(regionServer)) {
+                        unavailableServers.add(regionServer);
+                        RPCUtils.removeFromCache("region:" + regionServer);
+                    } else {
+                        RegionService regionService = RPCUtils.getRegionService(regionServer);
+
+                        // 调用RegionServer查询数据
+                        List<Map<String, Object>> result = regionService.select(tableName, columns, conditions);
+
+                        // 查询成功，返回结果
+                        return result;
+                    }
                 } catch (Exception e) {
                     unavailableServers.add(regionServer);
                     lastException = e;
