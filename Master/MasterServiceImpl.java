@@ -181,9 +181,6 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
                 List<String> sortedServers = new ArrayList<>(allRegionServers);
                 Collections.sort(sortedServers);
                 backupServer = sortedServers.get(sortedServers.size() - 1);
-                
-                // 确保备份服务器总是被包含在选中的服务器中
-                selectedServers.add(backupServer);
             }
             
             // 2. 从剩余服务器中选择负载最低的服务器作为数据分片服务器
@@ -200,11 +197,16 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
             });
             
             // 根据复制因子选择所需的分片服务器数量
-            int shardingCount = Math.min(shardingStrategy.getReplicationFactor() - 
-                                        (backupServer != null ? 1 : 0), shardingServers.size());
+            int shardingCount = Math.min(shardingStrategy.getReplicationFactor(), shardingServers.size());
             
+            // 添加分片服务器
             for (int i = 0; i < shardingCount; i++) {
                 selectedServers.add(shardingServers.get(i));
+            }
+            
+            // 如果有备份服务器，将其也添加到选中的服务器中
+            if (backupServer != null) {
+                selectedServers.add(backupServer);
             }
             
             if (selectedServers.isEmpty()) {

@@ -27,7 +27,7 @@ public class HashShardingStrategy implements ShardingStrategy {
             return null;
         }
         
-        // 获取可用于数据分片的服务器列表（排除备份服务器）
+        // 获取用于数据分片的服务器列表（排除备份服务器）
         List<String> shardingServers = getShardingServers(availableServers);
         if (shardingServers.isEmpty()) {
             // 如果没有足够的服务器进行分片，则使用所有可用服务器

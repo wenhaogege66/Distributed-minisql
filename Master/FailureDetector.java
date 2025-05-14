@@ -170,109 +170,140 @@ public class FailureDetector implements Watcher {
             Common.HashShardingStrategy shardingStrategy = new Common.HashShardingStrategy();
             String backupServer = shardingStrategy.getBackupServer(allServers);
             
-            // 确定目标服务器，从可用服务器中选择负载最低的
-            String targetServer = null;
+            System.out.println("处理表 " + tableName + " 的恢复，故障服务器: " + failedServer);
+            System.out.println("备份服务器: " + backupServer);
+            System.out.println("当前可用服务器: " + availableServers);
             
             // 如果失败的服务器是备份服务器，则需要重新指定一个备份服务器
             if (failedServer.equals(backupServer)) {
-                // 需要从正常的分片服务器中重新构建一个备份服务器
-                // 按名称排序可用服务器，选择新的备份服务器
+                System.out.println("备份服务器 " + backupServer + " 发生故障，需要重新指定新的备份服务器");
+                
+                // 从现有服务器中选择一个新的备份服务器
                 List<String> sortedAvailableServers = new ArrayList<>(availableServers);
                 Collections.sort(sortedAvailableServers);
-                String newBackupServer = sortedAvailableServers.get(sortedAvailableServers.size() - 1);
                 
-                // 将新备份服务器添加到恢复目标
-                if (!regionInfo.getRegionServers().contains(newBackupServer)) {
-                    regionInfo.addRegionServer(newBackupServer);
+                if (!sortedAvailableServers.isEmpty()) {
+                    String newBackupServer = sortedAvailableServers.get(sortedAvailableServers.size() - 1);
+                    System.out.println("选择 " + newBackupServer + " 作为新的备份服务器");
                     
-                    // 需要从所有其他服务器收集数据到新的备份服务器
+                    // 检查新备份服务器是否已在区域信息中
+                    if (!regionInfo.getRegionServers().contains(newBackupServer)) {
+                        regionInfo.addRegionServer(newBackupServer);
+                    }
+                    
+                    // 从所有其他可用的RegionServer收集数据至新的备份服务器
+                    System.out.println("开始从其他服务器收集数据到新备份服务器");
+                    
                     for (String server : regionInfo.getRegionServers()) {
                         if (!server.equals(newBackupServer)) {
-                            // 从现有服务器复制全部数据到新备份服务器
                             try {
-                                RegionService sourceService = RPCUtils.getRegionService(server);
-                                RegionService targetService = RPCUtils.getRegionService(newBackupServer);
+                                RegionService sourceRegion = RPCUtils.getRegionService(server);
+                                RegionService targetRegion = RPCUtils.getRegionService(newBackupServer);
                                 
-                                // 获取源服务器上的所有数据
-                                List<Map<String, Object>> allData = sourceService.select(tableName, null, new HashMap<>());
-                                
-                                // 插入到新备份服务器
-                                for (Map<String, Object> record : allData) {
-                                    targetService.insert(tableName, record);
+                                if (sourceRegion != null && targetRegion != null) {
+                                    // 获取源服务器上的所有数据
+                                    List<Map<String, Object>> allData = sourceRegion.select(tableName, null, new HashMap<>());
+                                    System.out.println("从 " + server + " 获取到 " + allData.size() + " 条数据");
+                                    
+                                    // 复制到新备份服务器
+                                    for (Map<String, Object> row : allData) {
+                                        targetRegion.insert(tableName, row);
+                                    }
+                                    System.out.println("成功将数据从 " + server + " 复制到新备份服务器 " + newBackupServer);
                                 }
-                                
-                                System.out.println("表 " + tableName + " 的数据已从 " + server + 
-                                                 " 复制到新的备份服务器 " + newBackupServer);
                             } catch (Exception e) {
                                 System.err.println("从 " + server + " 复制数据到 " + newBackupServer + " 失败: " + e.getMessage());
                             }
                         }
                     }
+                } else {
+                    System.err.println("没有可用服务器可以指定为新的备份服务器");
                 }
             } else {
                 // 如果失败的是普通分片服务器
-                // 1. 检查是否需要添加新的服务器
-                boolean needNewServer = regionInfo.getRegionServers().size() < 2; // 至少需要2个服务器
+                System.out.println("分片服务器 " + failedServer + " 发生故障，需要恢复其负责的分片数据");
                 
-                if (needNewServer && availableServers.size() > regionInfo.getRegionServers().size()) {
-                    // 按负载排序可用服务器
+                // 检查是否需要添加新的分片服务器
+                boolean needNewServer = regionInfo.getRegionServers().size() < 2; // 确保至少有2个服务器（包括备份）
+                
+                if (needNewServer) {
+                    // 从可用服务器中选择一个新的分片服务器
                     List<String> candidateServers = new ArrayList<>(availableServers);
-                    candidateServers.removeAll(regionInfo.getRegionServers()); // 移除已经在使用的服务器
-                    
-                    // 如果备份服务器可用，从候选服务器中移除它，因为它不应该用作普通分片服务器
+                    // 排除已经在使用的服务器
+                    candidateServers.removeAll(regionInfo.getRegionServers());
+                    // 排除备份服务器(如果备份服务器在可用列表中)
                     if (backupServer != null) {
                         candidateServers.remove(backupServer);
                     }
                     
+                    // 按负载排序候选服务器，选择负载最低的
                     if (!candidateServers.isEmpty()) {
-                        // 按负载排序候选服务器
-                        candidateServers.sort((s1, s2) -> serverLoads.getOrDefault(s1, 0) - serverLoads.getOrDefault(s2, 0));
-                        targetServer = candidateServers.get(0); // 选择负载最低的
+                        candidateServers.sort((s1, s2) -> 
+                            serverLoads.getOrDefault(s1, 0) - serverLoads.getOrDefault(s2, 0));
                         
-                        if (targetServer != null) {
-                            regionInfo.addRegionServer(targetServer);
-                            
-                            // 如果已经有备份服务器，从其中获取失败节点的数据
-                            if (backupServer != null && !backupServer.equals(failedServer) && 
-                                !regionInfo.getRegionServers().contains(backupServer)) {
-                                try {
-                                    RegionService backupService = RPCUtils.getRegionService(backupServer);
-                                    RegionService targetService = RPCUtils.getRegionService(targetServer);
+                        String newServer = candidateServers.get(0);
+                        System.out.println("选择 " + newServer + " 作为新的分片服务器，替代故障服务器 " + failedServer);
+                        
+                        // 添加新服务器到区域信息
+                        regionInfo.addRegionServer(newServer);
+                        
+                        // 从备份服务器恢复数据至新服务器
+                        if (backupServer != null && !backupServer.equals(failedServer)) {
+                            try {
+                                RegionService backupRegion = RPCUtils.getRegionService(backupServer);
+                                RegionService newRegion = RPCUtils.getRegionService(newServer);
+                                
+                                if (backupRegion != null && newRegion != null) {
+                                    // 获取备份服务器上的所有数据
+                                    List<Map<String, Object>> allData = backupRegion.select(tableName, null, new HashMap<>());
+                                    System.out.println("从备份服务器 " + backupServer + " 获取到 " + allData.size() + " 条数据");
                                     
-                                    // 从备份服务器获取数据
-                                    List<Map<String, Object>> allData = backupService.select(tableName, null, new HashMap<>());
-                                    
-                                    // 根据分片策略过滤应该存储在目标服务器上的数据
-                                    List<String> shardingServers = shardingStrategy.getShardingServers(regionInfo.getRegionServers());
+                                    // 获取表的主键
                                     String primaryKeyColumn = tableInfo.getPrimaryKey();
+                                    if (primaryKeyColumn == null) {
+                                        System.err.println("表 " + tableName + " 没有主键，无法确定分片数据");
+                                        return;
+                                    }
                                     
-                                    for (Map<String, Object> record : allData) {
-                                        Object primaryKeyValue = record.get(primaryKeyColumn);
+                                    // 确定哪些数据应该存储在新服务器上
+                                    List<String> shardingServers = new ArrayList<>(regionInfo.getRegionServers());
+                                    // 从分片服务器列表中排除备份服务器
+                                    shardingServers.remove(backupServer);
+                                    
+                                    int restoredCount = 0;
+                                    for (Map<String, Object> row : allData) {
+                                        Object primaryKeyValue = row.get(primaryKeyColumn);
                                         if (primaryKeyValue != null) {
-                                            // 确定该记录应该存储在哪个分片服务器上
-                                            String assignedServer = shardingStrategy.getServerForKey(primaryKeyValue, shardingServers);
+                                            // 使用与客户端相同的分片逻辑确定数据位置
+                                            String targetServer = shardingStrategy.getServerForKey(primaryKeyValue, shardingServers);
                                             
-                                            // 如果应该存储在目标服务器上，则插入
-                                            if (targetServer.equals(assignedServer)) {
-                                                targetService.insert(tableName, record);
+                                            if (newServer.equals(targetServer)) {
+                                                newRegion.insert(tableName, row);
+                                                restoredCount++;
                                             }
                                         }
                                     }
                                     
-                                    System.out.println("表 " + tableName + " 的数据已从备份服务器 " + backupServer + 
-                                                     " 恢复到 " + targetServer);
-                                } catch (Exception e) {
-                                    System.err.println("从备份服务器 " + backupServer + " 恢复数据到 " + targetServer + 
-                                                     " 失败: " + e.getMessage());
+                                    System.out.println("成功将 " + restoredCount + " 条数据从备份服务器 " + 
+                                                     backupServer + " 恢复到新服务器 " + newServer);
                                 }
+                            } catch (Exception e) {
+                                System.err.println("从备份服务器恢复数据失败: " + e.getMessage());
                             }
+                        } else {
+                            System.err.println("备份服务器不可用，无法恢复数据");
                         }
+                    } else {
+                        System.err.println("没有可用服务器可以替代故障服务器");
                     }
+                } else {
+                    System.out.println("剩余服务器数量足够，无需添加新服务器");
                 }
             }
             
-            // 更新表的区域信息
+            // 更新表区域信息到ZooKeeper
             masterService.updateTableRegionInfo(tableName, regionInfo);
+            System.out.println("表 " + tableName + " 的恢复过程完成，更新后的服务器列表: " + regionInfo.getRegionServers());
         } catch (Exception e) {
             System.err.println("恢复表 " + tableName + " 失败: " + e.getMessage());
             e.printStackTrace();

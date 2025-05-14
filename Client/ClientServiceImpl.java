@@ -1866,11 +1866,22 @@ public class ClientServiceImpl implements ClientService {
             String backupServer = shardingStrategy.getBackupServer(allServers);
             
             // 获取用于数据分片的服务器列表（排除备份服务器）
-            List<String> shardingServers = shardingStrategy.getShardingServers(servers);
+            List<String> shardingServers = new ArrayList<>(servers);
+            if (backupServer != null) {
+                shardingServers.remove(backupServer);
+            }
             
-            // 如果没有服务器用于分片，使用所有服务器
+            // 如果没有服务器用于分片，使用除备份服务器外的所有服务器
             if (shardingServers.isEmpty()) {
                 shardingServers = new ArrayList<>(servers);
+                if (backupServer != null) {
+                    shardingServers.remove(backupServer);
+                }
+                
+                // 如果仍然没有分片服务器，则使用所有服务器
+                if (shardingServers.isEmpty()) {
+                    shardingServers = new ArrayList<>(servers);
+                }
             }
             
             // 使用分片策略确定该数据应该存储在哪个RegionServer
@@ -1880,7 +1891,7 @@ public class ClientServiceImpl implements ClientService {
                 return Message.createErrorResponse("client", "user", "无法确定数据分片位置");
             }
             
-            // 跟踪插入状态
+            // 记录插入状态
             boolean primaryInsertSuccess = false;
             boolean backupInsertSuccess = false;
             String primaryError = null;
