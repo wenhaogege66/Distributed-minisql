@@ -73,4 +73,9 @@ public interface MasterService extends Remote {
      * @return 表信息列表
      */
     List<Metadata.TableInfo> getAllTables() throws RemoteException;
+
+    /**
+     * 获取表信息
+     */
+    Metadata.TableInfo getTableInfo(String tableName) throws RemoteException;
 } 

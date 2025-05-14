@@ -984,50 +984,81 @@ public class ClientServiceImpl implements ClientService {
     /**
      * 执行DELETE语句
      */
-    private Message executeDelete(String sql) throws RemoteException {
-        // 去掉可能的分号
-        if (sql.endsWith(";")) {
-            sql = sql.substring(0, sql.length() - 1);
-        }
-        
-        // 解析DELETE语句
-        Pattern pattern = Pattern.compile("DELETE\\s+FROM\\s+(\\w+)(\\s+WHERE\\s+(.+))?", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-        Matcher matcher = pattern.matcher(sql);
-        
-        if (!matcher.find()) {
-            return Message.createErrorResponse("client", "user", "SQL语法错误: " + sql);
-        }
-        
-        String tableName = matcher.group(1);
-        String whereClause = matcher.group(3); // 注意这里用group(3)，因为group(2)包含了WHERE关键字
-        
-        // 解析WHERE条件
-        Map<String, Object> conditions = new HashMap<>();
-        if (whereClause != null) {
-            String[] conditionParts = whereClause.split("AND");
-            for (String condition : conditionParts) {
-                condition = condition.trim();
-                String[] parts = condition.split("=");
-                if (parts.length == 2) {
-                    String column = parts[0].trim();
-                    String value = parts[1].trim();
+    @Override
+    public Message delete(String tableName, Map<String, Object> conditions) {
+        try {
+            // 获取表区域信息
+            if (!tableRegions.containsKey(tableName)) {
+                updateTableRegions(tableName);
+            }
+            
+            List<String> servers = tableRegions.get(tableName);
+            if (servers == null || servers.isEmpty()) {
+                return Message.createErrorResponse("client", "user", "找不到表所在的RegionServer: " + tableName);
+            }
+            
+            // 在所有RegionServer上执行删除，确保所有分片都得到更新
+            Map<String, Exception> exceptions = new HashMap<>();
+            Map<String, Integer> deleteCounts = new HashMap<>();
+            boolean hasSuccess = false;
+            
+            for (String regionServer : servers) {
+                try {
+                    RegionService regionService = RPCUtils.getRegionService(regionServer);
+                    Message response = regionService.delete(tableName, conditions);
                     
-                    // 去掉引号
-                    if (value.startsWith("'") && value.endsWith("'")) {
-                        value = value.substring(1, value.length() - 1);
-                    } else if (value.startsWith("\"") && value.endsWith("\"")) {
-                        value = value.substring(1, value.length() - 1);
+                    // 记录删除成功的服务器和删除的记录数
+                    if (response.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
+                        hasSuccess = true;
+                        int count = (Integer) response.getData("deletedCount");
+                        deleteCounts.put(regionServer, count);
+                        if (count > 0) {
+                            System.out.println("RegionServer " + regionServer + " 删除了 " + count + " 条记录");
+                        }
+                    } else {
+                        String error = (String) response.getData("error");
+                        exceptions.put(regionServer, new Exception(error));
                     }
+                } catch (Exception e) {
+                    exceptions.put(regionServer, e);
+                    System.err.println("RegionServer " + regionServer + " 删除失败: " + e.getMessage());
                     
-                    // 尝试转换为数值类型
-                    Object parsedValue = parseValue(value);
-                    conditions.put(column, parsedValue);
+                    // 从缓存中移除
+                    RPCUtils.removeFromCache("region:" + regionServer);
                 }
             }
+            
+            // 根据删除结果返回消息
+            if (hasSuccess) {
+                // 计算总共删除的记录数
+                int totalDeleted = deleteCounts.values().stream().mapToInt(Integer::intValue).sum();
+                
+                // 即使部分服务器失败，只要有成功的就返回成功
+                Message response = Message.createSuccessResponse("client", "user");
+                response.setData("deletedCount", totalDeleted);
+                
+                // 如果有服务器失败，添加警告信息
+                if (!exceptions.isEmpty()) {
+                    StringBuilder warning = new StringBuilder("警告：部分RegionServer删除失败: ");
+                    for (Map.Entry<String, Exception> entry : exceptions.entrySet()) {
+                        warning.append(entry.getKey()).append("(").append(entry.getValue().getMessage()).append("); ");
+                    }
+                    response.setData("warning", warning.toString());
+                }
+                
+                return response;
+            } else {
+                // 所有服务器都失败
+                StringBuilder errorMsg = new StringBuilder("删除数据失败: ");
+                for (Map.Entry<String, Exception> entry : exceptions.entrySet()) {
+                    errorMsg.append(entry.getKey()).append("(").append(entry.getValue().getMessage()).append("); ");
+                }
+                return Message.createErrorResponse("client", "user", errorMsg.toString());
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return Message.createErrorResponse("client", "user", "删除数据失败: " + e.getMessage());
         }
-        
-        // 调用RegionServer删除数据
-        return delete(tableName, conditions);
     }
     
     /**
@@ -1407,76 +1438,6 @@ public class ClientServiceImpl implements ClientService {
     }
     
     @Override
-    public Message delete(String tableName, Map<String, Object> conditions) {
-        try {
-            // 获取表区域信息
-            if (!tableRegions.containsKey(tableName)) {
-                updateTableRegions(tableName);
-            }
-            
-            List<String> servers = tableRegions.get(tableName);
-            if (servers == null || servers.isEmpty()) {
-                return Message.createErrorResponse("client", "user", "找不到表所在的RegionServer: " + tableName);
-            }
-            
-            // 尝试每个RegionServer，直到成功或全部失败
-            List<String> unavailableServers = new ArrayList<>();
-            Exception lastException = null;
-            
-            for (String regionServer : servers) {
-                try {
-                    RegionService regionService = RPCUtils.getRegionService(regionServer);
-                    Message response = regionService.delete(tableName, conditions);
-                    
-                    // 删除成功，返回结果
-                    return response;
-                } catch (Exception e) {
-                    unavailableServers.add(regionServer);
-                    lastException = e;
-                    System.err.println("RegionServer " + regionServer + " 删除失败: " + e.getMessage());
-                    
-                    // 从缓存中移除
-                    RPCUtils.removeFromCache("region:" + regionServer);
-                }
-            }
-            
-            // 所有服务器都失败，尝试从Master更新表区域信息
-            if (unavailableServers.size() == servers.size()) {
-                try {
-                    System.out.println("所有RegionServer不可用，尝试更新表区域信息");
-                    updateTableRegions(tableName);
-                    
-                    // 获取更新后的服务器列表
-                    List<String> updatedServers = tableRegions.get(tableName);
-                    if (updatedServers != null && !updatedServers.isEmpty()) {
-                        for (String server : updatedServers) {
-                            if (!unavailableServers.contains(server)) {
-                                try {
-                                    RegionService regionService = RPCUtils.getRegionService(server);
-                                    return regionService.delete(tableName, conditions);
-                                } catch (Exception e) {
-                                    System.err.println("更新后的RegionServer " + server + " 删除失败: " + e.getMessage());
-                                }
-                            }
-                        }
-                    }
-                } catch (Exception e) {
-                    System.err.println("更新表区域信息失败: " + e.getMessage());
-                }
-            }
-            
-            // 如果到这里，说明所有尝试都失败了
-            if (lastException != null) {
-                return Message.createErrorResponse("client", "user", "删除数据失败: " + lastException.getMessage());
-            }
-            return Message.createErrorResponse("client", "user", "删除数据失败: 所有RegionServer不可用");
-        } catch (Exception e) {
-            e.printStackTrace();
-            return Message.createErrorResponse("client", "user", "删除数据失败: " + e.getMessage());
-        }
-    }
-    
-    @Override
     public Message update(String tableName, Map<String, Object> values, Map<String, Object> conditions) {
         try {
             // 获取表区域信息
@@ -1630,34 +1591,23 @@ public class ClientServiceImpl implements ClientService {
             
             List<String> servers = tableRegions.get(tableName);
             if (servers == null || servers.isEmpty()) {
-                throw new RemoteException("找不到表所在的RegionServer: " + tableName);
+                System.err.println("找不到表所在的RegionServer: " + tableName);
+                return new ArrayList<>();
             }
             
-            // 尝试每个RegionServer，直到成功或全部失败
+            // 记录每个服务器的结果
+            Map<String, List<Map<String, Object>>> resultsFromRegions = new HashMap<>();
             List<String> unavailableServers = new ArrayList<>();
-            Exception lastException = null;
-            List<Map<String, Object>> allResults = new ArrayList<>();
             
+            // 从每个RegionServer查询数据
             for (String regionServer : servers) {
                 try {
-                    if (!masterService.getRegionServerStatus(regionServer)) {
-                        unavailableServers.add(regionServer);
-                        RPCUtils.removeFromCache("region:" + regionServer);
-                    } else {
-                        RegionService regionService = RPCUtils.getRegionService(regionServer);
-
-                        // 调用RegionServer查询数据
-                        List<Map<String, Object>> result = regionService.select(tableName, columns, conditions);
-                        // 只有当结果不为空时才打印
-                        if (result != null && !result.isEmpty()) {
-                            System.out.println("成功从表 " + tableName + " 查询 " + result.size() + " 条记录");
-                            // 将结果添加到总结果集
-                            allResults.addAll(result);
-                        }
-                    }
+                    RegionService regionService = RPCUtils.getRegionService(regionServer);
+                    List<Map<String, Object>> result = regionService.select(tableName, columns, conditions);
+                    resultsFromRegions.put(regionServer, result);
+                    System.out.println("成功从表 " + tableName + " 查询 " + result.size() + " 条记录");
                 } catch (Exception e) {
                     unavailableServers.add(regionServer);
-                    lastException = e;
                     System.err.println("RegionServer " + regionServer + " 查询失败: " + e.getMessage());
                     
                     // 从缓存中移除
@@ -1665,86 +1615,86 @@ public class ClientServiceImpl implements ClientService {
                 }
             }
             
-            // 所有服务器都失败，尝试从Master更新表区域信息
-            if (unavailableServers.size() == servers.size()) {
+            // 合并结果，避免重复数据
+            List<Map<String, Object>> mergedResults = mergeQueryResults(tableName, resultsFromRegions);
+            
+            // 如果有服务器不可用，尝试从Master更新表区域信息
+            if (!unavailableServers.isEmpty()) {
                 try {
-                    System.out.println("所有RegionServer不可用，尝试更新表区域信息");
+                    System.out.println("有RegionServer不可用，尝试更新表区域信息");
                     updateTableRegions(tableName);
-                    
-                    // 获取更新后的服务器列表
-                    List<String> updatedServers = tableRegions.get(tableName);
-                    if (updatedServers != null && !updatedServers.isEmpty()) {
-                        for (String server : updatedServers) {
-                            if (!unavailableServers.contains(server)) {
-                                try {
-                                    RegionService regionService = RPCUtils.getRegionService(server);
-                                    List<Map<String, Object>> result = regionService.select(tableName, columns, conditions);
-                                    if (result != null && !result.isEmpty()) {
-                                        allResults.addAll(result);
-                                    }
-                                } catch (Exception e) {
-                                    System.err.println("更新后的RegionServer " + server + " 查询失败: " + e.getMessage());
-                                }
-                            }
-                        }
-                    }
                 } catch (Exception e) {
                     System.err.println("更新表区域信息失败: " + e.getMessage());
                 }
             }
             
-            // 对结果进行去重
-            List<Map<String, Object>> uniqueResults = removeDuplicates(allResults);
-            
-            return uniqueResults;
+            return mergedResults;
         } catch (Exception e) {
             e.printStackTrace();
-            System.err.println("查询数据失败: " + e.getMessage());
             return new ArrayList<>();
         }
     }
     
     /**
-     * 移除结果集中的重复数据
+     * 合并多个RegionServer返回的查询结果，避免重复数据
      */
-    private List<Map<String, Object>> removeDuplicates(List<Map<String, Object>> results) {
-        if (results == null || results.isEmpty()) {
-            return results;
+    private List<Map<String, Object>> mergeQueryResults(String tableName, 
+                                                       Map<String, List<Map<String, Object>>> resultsFromRegions) {
+        List<Map<String, Object>> mergedResults = new ArrayList<>();
+        
+        // 如果没有结果，直接返回空列表
+        if (resultsFromRegions.isEmpty()) {
+            return mergedResults;
         }
         
-        // 使用LinkedHashSet保持顺序的同时去重
-        Set<String> seenItems = new HashSet<>();
-        List<Map<String, Object>> uniqueList = new ArrayList<>();
+        // 获取表的主键，用于去重
+        String primaryKey = null;
+        try {
+            // 尝试从Master获取表结构信息
+            Metadata.TableInfo tableInfo = masterService.getTableInfo(tableName);
+            if (tableInfo != null) {
+                primaryKey = tableInfo.getPrimaryKey();
+            }
+        } catch (Exception e) {
+            System.err.println("获取表主键信息失败: " + e.getMessage());
+        }
         
-        for (Map<String, Object> row : results) {
-            // 将行转换为唯一的字符串表示
-            String rowKey = generateRowKey(row);
-            if (!seenItems.contains(rowKey)) {
-                seenItems.add(rowKey);
-                uniqueList.add(row);
+        // 使用Set去重
+        Set<String> processedKeys = new HashSet<>();
+        
+        // 处理每个RegionServer返回的结果
+        for (Map.Entry<String, List<Map<String, Object>>> entry : resultsFromRegions.entrySet()) {
+            String regionServer = entry.getKey();
+            List<Map<String, Object>> results = entry.getValue();
+            
+            for (Map<String, Object> row : results) {
+                // 如果有主键，使用主键值去重
+                if (primaryKey != null && row.containsKey(primaryKey)) {
+                    Object keyValue = row.get(primaryKey);
+                    String keyString = String.valueOf(keyValue);
+                    
+                    // 如果这个主键值已经处理过，跳过这条记录
+                    if (processedKeys.contains(keyString)) {
+                        continue;
+                    }
+                    
+                    processedKeys.add(keyString);
+                } else {
+                    // 如果没有主键或行中不包含主键，使用整行数据的字符串表示去重
+                    String rowString = row.toString();
+                    if (processedKeys.contains(rowString)) {
+                        continue;
+                    }
+                    
+                    processedKeys.add(rowString);
+                }
+                
+                // 添加到合并结果中
+                mergedResults.add(row);
             }
         }
         
-        return uniqueList;
-    }
-    
-    /**
-     * 为行数据生成唯一键
-     */
-    private String generateRowKey(Map<String, Object> row) {
-        StringBuilder sb = new StringBuilder();
-        // 按键排序，确保相同数据生成相同的键
-        List<String> keys = new ArrayList<>(row.keySet());
-        Collections.sort(keys);
-        
-        for (String key : keys) {
-            Object value = row.get(key);
-            sb.append(key).append("=");
-            sb.append(value == null ? "null" : value.toString());
-            sb.append(";");
-        }
-        
-        return sb.toString();
+        return mergedResults;
     }
 
     /**
@@ -1856,5 +1806,54 @@ public class ClientServiceImpl implements ClientService {
             System.err.println("从分片 " + shardServer + " 查询失败: " + e.getMessage());
             throw new RemoteException("查询失败: " + e.getMessage());
         }
+    }
+
+    /**
+     * 执行DELETE语句
+     */
+    private Message executeDelete(String sql) throws RemoteException {
+        // 去掉可能的分号
+        if (sql.endsWith(";")) {
+            sql = sql.substring(0, sql.length() - 1);
+        }
+        
+        // 解析DELETE语句
+        Pattern pattern = Pattern.compile("DELETE\\s+FROM\\s+(\\w+)(\\s+WHERE\\s+(.+))?", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+        Matcher matcher = pattern.matcher(sql);
+        
+        if (!matcher.find()) {
+            return Message.createErrorResponse("client", "user", "SQL语法错误: " + sql);
+        }
+        
+        String tableName = matcher.group(1);
+        String whereClause = matcher.group(3); // 注意这里用group(3)，因为group(2)包含了WHERE关键字
+        
+        // 解析WHERE条件
+        Map<String, Object> conditions = new HashMap<>();
+        if (whereClause != null) {
+            String[] conditionParts = whereClause.split("AND");
+            for (String condition : conditionParts) {
+                condition = condition.trim();
+                String[] parts = condition.split("=");
+                if (parts.length == 2) {
+                    String column = parts[0].trim();
+                    String value = parts[1].trim();
+                    
+                    // 去掉引号
+                    if (value.startsWith("'") && value.endsWith("'")) {
+                        value = value.substring(1, value.length() - 1);
+                    } else if (value.startsWith("\"") && value.endsWith("\"")) {
+                        value = value.substring(1, value.length() - 1);
+                    }
+                    
+                    // 尝试转换为数值类型
+                    Object parsedValue = parseValue(value);
+                    conditions.put(column, parsedValue);
+                }
+            }
+        }
+        
+        // 调用RegionServer删除数据
+        return delete(tableName, conditions);
     }
 } 

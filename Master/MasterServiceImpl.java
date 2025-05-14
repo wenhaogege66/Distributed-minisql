@@ -572,7 +572,8 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
     /**
      * 获取表信息
      */
-    public Metadata.TableInfo getTableInfo(String tableName) {
+    @Override
+    public Metadata.TableInfo getTableInfo(String tableName) throws RemoteException {
         return tables.get(tableName);
     }
     
