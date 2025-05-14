@@ -80,24 +80,28 @@ public class HashShardingStrategy implements ShardingStrategy {
             return new ArrayList<>();
         }
         
-        // 使用与目前createTable方法相同的逻辑
         List<String> selectedServers = new ArrayList<>();
         
-        // 识别备份服务器（使用排序后的最后一个）
-        String backupServer = null;
-        if (availableServers.size() >= 3) {
-            List<String> sortedServers = new ArrayList<>(availableServers);
-            Collections.sort(sortedServers);
-            backupServer = sortedServers.get(sortedServers.size() - 1);
-            
-            // 确保备份服务器总是被包含在选中的服务器中
+        // 获取用于数据分片的服务器列表（排除备份服务器）
+        List<String> shardingServers = getShardingServers(availableServers);
+        
+        // 识别备份服务器（按名称排序后的最后一个）
+        String backupServer = getBackupServer(availableServers);
+        
+        // 如果存在备份服务器，总是将其添加到所选服务器中
+        if (backupServer != null) {
             selectedServers.add(backupServer);
+            
+            // 从分片服务器中移除备份服务器（确保不重复）
+            shardingServers.remove(backupServer);
         }
         
-        // 从剩余服务器中选择负载最低的服务器作为数据分片服务器
-        List<String> shardingServers = new ArrayList<>(availableServers);
-        if (backupServer != null) {
-            shardingServers.remove(backupServer);
+        // 如果没有足够的服务器进行分片，使用所有可用服务器
+        if (shardingServers.isEmpty()) {
+            if (!selectedServers.isEmpty()) {
+                return selectedServers; // 只有备份服务器
+            }
+            shardingServers = new ArrayList<>(availableServers);
         }
         
         // 按负载排序服务器
@@ -107,9 +111,17 @@ public class HashShardingStrategy implements ShardingStrategy {
             return Integer.compare(load1, load2);
         });
         
-        // 根据复制因子选择所需的分片服务器数量
-        int shardingCount = Math.min(replicationFactor - (backupServer != null ? 1 : 0), shardingServers.size());
+        // 选择负载最低的服务器作为数据分片服务器
+        // 当备份服务器已在selectedServers列表中时，只需要额外选择(replicationFactor-1)个服务器
+        // 否则需要选择replicationFactor个服务器
+        int neededShardingServers = backupServer != null ? 
+                                   replicationFactor - 1 : 
+                                   replicationFactor;
         
+        // 确保不选择超过可用服务器数量
+        int shardingCount = Math.min(neededShardingServers, shardingServers.size());
+        
+        // 添加分片服务器
         for (int i = 0; i < shardingCount; i++) {
             selectedServers.add(shardingServers.get(i));
         }
@@ -123,39 +135,33 @@ public class HashShardingStrategy implements ShardingStrategy {
     }
     
     /**
-     * 获取备份服务器
+     * 获取备份服务器（按名称排序后的最后一个服务器）
      */
     public String getBackupServer(List<String> availableServers) {
         if (availableServers == null || availableServers.size() < 3) {
-            return null; // 至少需要3个服务器才能有专用备份
+            return null;
         }
         
-        // 复制可用服务器列表并排序
-        List<String> servers = new ArrayList<>(availableServers);
-        Collections.sort(servers);
-        
-        // 返回最后一个服务器作为备份服务器
-        return servers.get(servers.size() - 1);
+        List<String> sortedServers = new ArrayList<>(availableServers);
+        Collections.sort(sortedServers);
+        return sortedServers.get(sortedServers.size() - 1);
     }
     
     /**
-     * 获取可用于数据分片的服务器列表（排除备份服务器）
+     * 获取用于分片的服务器列表（即排除备份服务器后的服务器列表）
      */
     public List<String> getShardingServers(List<String> availableServers) {
-        if (availableServers == null || availableServers.size() <= reservedBackupServers) {
-            return new ArrayList<>(availableServers); // 如果服务器不足，返回所有服务器
+        List<String> shardingServers = new ArrayList<>(availableServers);
+        
+        // 如果有足够的服务器，移除备份服务器
+        if (availableServers.size() >= 3) {
+            String backupServer = getBackupServer(availableServers);
+            if (backupServer != null) {
+                shardingServers.remove(backupServer);
+            }
         }
         
-        // 复制可用服务器列表并排序
-        List<String> servers = new ArrayList<>(availableServers);
-        Collections.sort(servers);
-        
-        // 移除用于备份的服务器
-        if (servers.size() >= 3) {
-            servers.remove(servers.size() - 1); // 移除最后一个作为备份服务器
-        }
-        
-        return servers;
+        return shardingServers;
     }
     
     /**

@@ -984,81 +984,50 @@ public class ClientServiceImpl implements ClientService {
     /**
      * 执行DELETE语句
      */
-    @Override
-    public Message delete(String tableName, Map<String, Object> conditions) {
-        try {
-            // 获取表区域信息
-            if (!tableRegions.containsKey(tableName)) {
-                updateTableRegions(tableName);
-            }
-            
-            List<String> servers = tableRegions.get(tableName);
-            if (servers == null || servers.isEmpty()) {
-                return Message.createErrorResponse("client", "user", "找不到表所在的RegionServer: " + tableName);
-            }
-            
-            // 在所有RegionServer上执行删除，确保所有分片都得到更新
-            Map<String, Exception> exceptions = new HashMap<>();
-            Map<String, Integer> deleteCounts = new HashMap<>();
-            boolean hasSuccess = false;
-            
-            for (String regionServer : servers) {
-                try {
-                    RegionService regionService = RPCUtils.getRegionService(regionServer);
-                    Message response = regionService.delete(tableName, conditions);
-                    
-                    // 记录删除成功的服务器和删除的记录数
-                    if (response.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
-                        hasSuccess = true;
-                        int count = (Integer) response.getData("deletedCount");
-                        deleteCounts.put(regionServer, count);
-                        if (count > 0) {
-                            System.out.println("RegionServer " + regionServer + " 删除了 " + count + " 条记录");
-                        }
-                    } else {
-                        String error = (String) response.getData("error");
-                        exceptions.put(regionServer, new Exception(error));
-                    }
-                } catch (Exception e) {
-                    exceptions.put(regionServer, e);
-                    System.err.println("RegionServer " + regionServer + " 删除失败: " + e.getMessage());
-                    
-                    // 从缓存中移除
-                    RPCUtils.removeFromCache("region:" + regionServer);
-                }
-            }
-            
-            // 根据删除结果返回消息
-            if (hasSuccess) {
-                // 计算总共删除的记录数
-                int totalDeleted = deleteCounts.values().stream().mapToInt(Integer::intValue).sum();
-                
-                // 即使部分服务器失败，只要有成功的就返回成功
-                Message response = Message.createSuccessResponse("client", "user");
-                response.setData("deletedCount", totalDeleted);
-                
-                // 如果有服务器失败，添加警告信息
-                if (!exceptions.isEmpty()) {
-                    StringBuilder warning = new StringBuilder("警告：部分RegionServer删除失败: ");
-                    for (Map.Entry<String, Exception> entry : exceptions.entrySet()) {
-                        warning.append(entry.getKey()).append("(").append(entry.getValue().getMessage()).append("); ");
-                    }
-                    response.setData("warning", warning.toString());
-                }
-                
-                return response;
-            } else {
-                // 所有服务器都失败
-                StringBuilder errorMsg = new StringBuilder("删除数据失败: ");
-                for (Map.Entry<String, Exception> entry : exceptions.entrySet()) {
-                    errorMsg.append(entry.getKey()).append("(").append(entry.getValue().getMessage()).append("); ");
-                }
-                return Message.createErrorResponse("client", "user", errorMsg.toString());
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-            return Message.createErrorResponse("client", "user", "删除数据失败: " + e.getMessage());
+    private Message executeDelete(String sql) throws RemoteException {
+        // 去掉可能的分号
+        if (sql.endsWith(";")) {
+            sql = sql.substring(0, sql.length() - 1);
         }
+        
+        // 解析DELETE语句
+        Pattern pattern = Pattern.compile("DELETE\\s+FROM\\s+(\\w+)(\\s+WHERE\\s+(.+))?", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+        Matcher matcher = pattern.matcher(sql);
+        
+        if (!matcher.find()) {
+            return Message.createErrorResponse("client", "user", "SQL语法错误: " + sql);
+        }
+        
+        String tableName = matcher.group(1);
+        String whereClause = matcher.group(3); // 注意这里用group(3)，因为group(2)包含了WHERE关键字
+        
+        // 解析WHERE条件
+        Map<String, Object> conditions = new HashMap<>();
+        if (whereClause != null) {
+            String[] conditionParts = whereClause.split("AND");
+            for (String condition : conditionParts) {
+                condition = condition.trim();
+                String[] parts = condition.split("=");
+                if (parts.length == 2) {
+                    String column = parts[0].trim();
+                    String value = parts[1].trim();
+                    
+                    // 去掉引号
+                    if (value.startsWith("'") && value.endsWith("'")) {
+                        value = value.substring(1, value.length() - 1);
+                    } else if (value.startsWith("\"") && value.endsWith("\"")) {
+                        value = value.substring(1, value.length() - 1);
+                    }
+                    
+                    // 尝试转换为数值类型
+                    Object parsedValue = parseValue(value);
+                    conditions.put(column, parsedValue);
+                }
+            }
+        }
+        
+        // 调用RegionServer删除数据
+        return delete(tableName, conditions);
     }
     
     /**
@@ -1320,197 +1289,6 @@ public class ClientServiceImpl implements ClientService {
         } catch (Exception e) {
             e.printStackTrace();
             return Message.createErrorResponse("client", "user", "删除索引失败: " + e.getMessage());
-        }
-    }
-    
-    @Override
-    public Message insert(String tableName, Map<String, Object> values) {
-        try {
-            // 获取表区域信息
-            if (!tableRegions.containsKey(tableName)) {
-                updateTableRegions(tableName);
-            }
-            
-            List<String> servers = tableRegions.get(tableName);
-            if (servers == null || servers.isEmpty()) {
-                return Message.createErrorResponse("client", "user", "找不到表所在的RegionServer: " + tableName);
-            }
-            
-            // 获取表的主键信息
-            Metadata.TableInfo tableInfo = null;
-            List<Metadata.TableInfo> tables = getAllTables();
-            for (Metadata.TableInfo table : tables) {
-                if (table.getTableName().equals(tableName)) {
-                    tableInfo = table;
-                    break;
-                }
-            }
-            
-            if (tableInfo == null) {
-                return Message.createErrorResponse("client", "user", "表不存在: " + tableName);
-            }
-            
-            // 获取表的主键
-            String primaryKeyColumn = null;
-            // 先获取表定义的主键
-            primaryKeyColumn = tableInfo.getPrimaryKey();
-            
-            if (primaryKeyColumn == null) {
-                return Message.createErrorResponse("client", "user", "表没有主键，无法确定分片位置");
-            }
-            
-            // 获取主键值
-            Object primaryKeyValue = values.get(primaryKeyColumn);
-            if (primaryKeyValue == null) {
-                return Message.createErrorResponse("client", "user", "主键值不能为空");
-            }
-            
-            // 使用分片策略确定该数据应该存储在哪个RegionServer
-            Common.ShardingStrategy shardingStrategy = new Common.HashShardingStrategy();
-            String targetServer = shardingStrategy.getServerForKey(primaryKeyValue, servers);
-            
-            if (targetServer == null) {
-                return Message.createErrorResponse("client", "user", "无法确定数据分片位置");
-            }
-            
-            try {
-                // 连接到目标RegionServer
-                RegionService regionService = RPCUtils.getRegionService(targetServer);
-                Message response = regionService.insert(tableName, values);
-                
-                // 如果成功插入到主分片，还需要插入备份
-                if (response.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
-                    // 1. 插入到备份服务器（如果存在3个或更多RegionServer）
-                    if (servers.size() >= 3) {
-                        // 获取所有RegionServer列表
-                        List<String> allServers = getAllRegionServers();
-                        
-                        if (allServers.size() >= 3) {
-                            // 获取备份服务器（通常是按名称排序后的最后一个服务器）
-                            List<String> backupServers = new ArrayList<>(allServers);
-                            Collections.sort(backupServers);
-                            String backupServer = backupServers.get(backupServers.size() - 1);
-                            
-                            // 如果备份服务器与目标服务器不同，则进行备份
-                            if (!backupServer.equals(targetServer)) {
-                                try {
-                                    RegionService backupService = RPCUtils.getRegionService(backupServer);
-                                    backupService.insert(tableName, values);
-                                    System.out.println("数据已备份到服务器: " + backupServer);
-                                } catch (Exception e) {
-                                    System.err.println("备份数据到服务器 " + backupServer + " 失败: " + e.getMessage());
-                                }
-                            }
-                        }
-                    }
-                    
-                    return response;
-                } else {
-                    return response;
-                }
-            } catch (Exception e) {
-                // 失败后尝试其他服务器
-                System.err.println("RegionServer " + targetServer + " 插入失败: " + e.getMessage());
-                RPCUtils.removeFromCache("region:" + targetServer);
-                
-                // 尝试任何其他可用的服务器
-                Exception lastException = e;
-                for (String server : servers) {
-                    if (!server.equals(targetServer)) {
-                        try {
-                            RegionService regionService = RPCUtils.getRegionService(server);
-                            return regionService.insert(tableName, values);
-                        } catch (Exception ex) {
-                            lastException = ex;
-                            System.err.println("RegionServer " + server + " 插入失败: " + ex.getMessage());
-                            RPCUtils.removeFromCache("region:" + server);
-                        }
-                    }
-                }
-                
-                // 所有尝试都失败
-                return Message.createErrorResponse("client", "user", "插入数据失败: " + lastException.getMessage());
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-            return Message.createErrorResponse("client", "user", "插入数据失败: " + e.getMessage());
-        }
-    }
-    
-    @Override
-    public Message update(String tableName, Map<String, Object> values, Map<String, Object> conditions) {
-        try {
-            // 获取表区域信息
-            if (!tableRegions.containsKey(tableName)) {
-                updateTableRegions(tableName);
-            }
-            
-            List<String> servers = tableRegions.get(tableName);
-            if (servers == null || servers.isEmpty()) {
-                return Message.createErrorResponse("client", "user", "找不到表所在的RegionServer: " + tableName);
-            }
-            
-            // 在所有RegionServer上执行更新，确保所有分片都得到更新
-            Map<String, Exception> exceptions = new HashMap<>();
-            Map<String, Integer> updateCounts = new HashMap<>();
-            boolean hasSuccess = false;
-            
-            for (String regionServer : servers) {
-                try {
-                    RegionService regionService = RPCUtils.getRegionService(regionServer);
-                    Message response = regionService.update(tableName, values, conditions);
-                    
-                    // 记录更新成功的服务器和更新的记录数
-                    if (response.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
-                        hasSuccess = true;
-                        int count = (Integer) response.getData("updatedCount");
-                        updateCounts.put(regionServer, count);
-                        if (count > 0) {
-                            System.out.println("RegionServer " + regionServer + " 更新了 " + count + " 条记录");
-                        }
-                    } else {
-                        String error = (String) response.getData("error");
-                        exceptions.put(regionServer, new Exception(error));
-                    }
-                } catch (Exception e) {
-                    exceptions.put(regionServer, e);
-                    System.err.println("RegionServer " + regionServer + " 更新失败: " + e.getMessage());
-                    
-                    // 从缓存中移除
-                    RPCUtils.removeFromCache("region:" + regionServer);
-                }
-            }
-            
-            // 根据更新结果返回消息
-            if (hasSuccess) {
-                // 计算总共更新的记录数
-                int totalUpdated = updateCounts.values().stream().mapToInt(Integer::intValue).sum();
-                
-                // 即使部分服务器失败，只要有成功的就返回成功
-                Message response = Message.createSuccessResponse("client", "user");
-                response.setData("updatedCount", totalUpdated);
-                
-                // 如果有服务器失败，添加警告信息
-                if (!exceptions.isEmpty()) {
-                    StringBuilder warning = new StringBuilder("警告：部分RegionServer更新失败: ");
-                    for (Map.Entry<String, Exception> entry : exceptions.entrySet()) {
-                        warning.append(entry.getKey()).append("(").append(entry.getValue().getMessage()).append("); ");
-                    }
-                    response.setData("warning", warning.toString());
-                }
-                
-                return response;
-            } else {
-                // 所有服务器都失败
-                StringBuilder errorMsg = new StringBuilder("更新数据失败: ");
-                for (Map.Entry<String, Exception> entry : exceptions.entrySet()) {
-                    errorMsg.append(entry.getKey()).append("(").append(entry.getValue().getMessage()).append("); ");
-                }
-                return Message.createErrorResponse("client", "user", errorMsg.toString());
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-            return Message.createErrorResponse("client", "user", "更新数据失败: " + e.getMessage());
         }
     }
     
@@ -1811,49 +1589,387 @@ public class ClientServiceImpl implements ClientService {
     /**
      * 执行DELETE语句
      */
-    private Message executeDelete(String sql) throws RemoteException {
-        // 去掉可能的分号
-        if (sql.endsWith(";")) {
-            sql = sql.substring(0, sql.length() - 1);
-        }
-        
-        // 解析DELETE语句
-        Pattern pattern = Pattern.compile("DELETE\\s+FROM\\s+(\\w+)(\\s+WHERE\\s+(.+))?", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-        Matcher matcher = pattern.matcher(sql);
-        
-        if (!matcher.find()) {
-            return Message.createErrorResponse("client", "user", "SQL语法错误: " + sql);
-        }
-        
-        String tableName = matcher.group(1);
-        String whereClause = matcher.group(3); // 注意这里用group(3)，因为group(2)包含了WHERE关键字
-        
-        // 解析WHERE条件
-        Map<String, Object> conditions = new HashMap<>();
-        if (whereClause != null) {
-            String[] conditionParts = whereClause.split("AND");
-            for (String condition : conditionParts) {
-                condition = condition.trim();
-                String[] parts = condition.split("=");
-                if (parts.length == 2) {
-                    String column = parts[0].trim();
-                    String value = parts[1].trim();
+    private Message executeDelete(String tableName, Map<String, Object> conditions) {
+        try {
+            // 获取表区域信息
+            if (!tableRegions.containsKey(tableName)) {
+                updateTableRegions(tableName);
+            }
+            
+            List<String> servers = tableRegions.get(tableName);
+            if (servers == null || servers.isEmpty()) {
+                return Message.createErrorResponse("client", "user", "找不到表所在的RegionServer: " + tableName);
+            }
+            
+            // 在所有RegionServer上执行删除，确保所有分片都得到更新
+            Map<String, Exception> exceptions = new HashMap<>();
+            Map<String, Integer> deleteCounts = new HashMap<>();
+            boolean hasSuccess = false;
+            
+            for (String regionServer : servers) {
+                try {
+                    RegionService regionService = RPCUtils.getRegionService(regionServer);
+                    Message response = regionService.delete(tableName, conditions);
                     
-                    // 去掉引号
-                    if (value.startsWith("'") && value.endsWith("'")) {
-                        value = value.substring(1, value.length() - 1);
-                    } else if (value.startsWith("\"") && value.endsWith("\"")) {
-                        value = value.substring(1, value.length() - 1);
+                    // 记录删除成功的服务器和删除的记录数
+                    if (response.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
+                        hasSuccess = true;
+                        int count = (Integer) response.getData("deletedCount");
+                        deleteCounts.put(regionServer, count);
+                        if (count > 0) {
+                            System.out.println("RegionServer " + regionServer + " 删除了 " + count + " 条记录");
+                        }
+                    } else {
+                        String error = (String) response.getData("error");
+                        exceptions.put(regionServer, new Exception(error));
                     }
+                } catch (Exception e) {
+                    exceptions.put(regionServer, e);
+                    System.err.println("RegionServer " + regionServer + " 删除失败: " + e.getMessage());
                     
-                    // 尝试转换为数值类型
-                    Object parsedValue = parseValue(value);
-                    conditions.put(column, parsedValue);
+                    // 从缓存中移除
+                    RPCUtils.removeFromCache("region:" + regionServer);
                 }
             }
+            
+            // 根据删除结果返回消息
+            if (hasSuccess) {
+                // 计算总共删除的记录数
+                int totalDeleted = deleteCounts.values().stream().mapToInt(Integer::intValue).sum();
+                
+                // 即使部分服务器失败，只要有成功的就返回成功
+                Message response = Message.createSuccessResponse("client", "user");
+                response.setData("deletedCount", totalDeleted);
+                
+                // 如果有服务器失败，添加警告信息
+                if (!exceptions.isEmpty()) {
+                    StringBuilder warning = new StringBuilder("警告：部分RegionServer删除失败: ");
+                    for (Map.Entry<String, Exception> entry : exceptions.entrySet()) {
+                        warning.append(entry.getKey()).append("(").append(entry.getValue().getMessage()).append("); ");
+                    }
+                    response.setData("warning", warning.toString());
+                }
+                
+                return response;
+            } else {
+                // 所有服务器都失败
+                StringBuilder errorMsg = new StringBuilder("删除数据失败: ");
+                for (Map.Entry<String, Exception> entry : exceptions.entrySet()) {
+                    errorMsg.append(entry.getKey()).append("(").append(entry.getValue().getMessage()).append("); ");
+                }
+                return Message.createErrorResponse("client", "user", errorMsg.toString());
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return Message.createErrorResponse("client", "user", "删除数据失败: " + e.getMessage());
         }
-        
-        // 调用RegionServer删除数据
-        return delete(tableName, conditions);
+    }
+
+    @Override
+    public Message update(String tableName, Map<String, Object> values, Map<String, Object> conditions) {
+        try {
+            // 获取表区域信息
+            if (!tableRegions.containsKey(tableName)) {
+                updateTableRegions(tableName);
+            }
+            
+            List<String> servers = tableRegions.get(tableName);
+            if (servers == null || servers.isEmpty()) {
+                return Message.createErrorResponse("client", "user", "找不到表所在的RegionServer: " + tableName);
+            }
+            
+            // 在所有RegionServer上执行更新，确保所有分片都得到更新
+            Map<String, Exception> exceptions = new HashMap<>();
+            Map<String, Integer> updateCounts = new HashMap<>();
+            boolean hasSuccess = false;
+            
+            for (String regionServer : servers) {
+                try {
+                    RegionService regionService = RPCUtils.getRegionService(regionServer);
+                    Message response = regionService.update(tableName, values, conditions);
+                    
+                    // 记录更新成功的服务器和更新的记录数
+                    if (response.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
+                        hasSuccess = true;
+                        int count = (Integer) response.getData("updatedCount");
+                        updateCounts.put(regionServer, count);
+                        if (count > 0) {
+                            System.out.println("RegionServer " + regionServer + " 更新了 " + count + " 条记录");
+                        }
+                    } else {
+                        String error = (String) response.getData("error");
+                        exceptions.put(regionServer, new Exception(error));
+                    }
+                } catch (Exception e) {
+                    exceptions.put(regionServer, e);
+                    System.err.println("RegionServer " + regionServer + " 更新失败: " + e.getMessage());
+                    
+                    // 从缓存中移除
+                    RPCUtils.removeFromCache("region:" + regionServer);
+                }
+            }
+            
+            // 根据更新结果返回消息
+            if (hasSuccess) {
+                // 计算总共更新的记录数
+                int totalUpdated = updateCounts.values().stream().mapToInt(Integer::intValue).sum();
+                
+                // 即使部分服务器失败，只要有成功的就返回成功
+                Message response = Message.createSuccessResponse("client", "user");
+                response.setData("updatedCount", totalUpdated);
+                
+                // 如果有服务器失败，添加警告信息
+                if (!exceptions.isEmpty()) {
+                    StringBuilder warning = new StringBuilder("警告：部分RegionServer更新失败: ");
+                    for (Map.Entry<String, Exception> entry : exceptions.entrySet()) {
+                        warning.append(entry.getKey()).append("(").append(entry.getValue().getMessage()).append("); ");
+                    }
+                    response.setData("warning", warning.toString());
+                }
+                
+                return response;
+            } else {
+                // 所有服务器都失败
+                StringBuilder errorMsg = new StringBuilder("更新数据失败: ");
+                for (Map.Entry<String, Exception> entry : exceptions.entrySet()) {
+                    errorMsg.append(entry.getKey()).append("(").append(entry.getValue().getMessage()).append("); ");
+                }
+                return Message.createErrorResponse("client", "user", errorMsg.toString());
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return Message.createErrorResponse("client", "user", "更新数据失败: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public Message delete(String tableName, Map<String, Object> conditions) {
+        try {
+            // 获取表区域信息
+            if (!tableRegions.containsKey(tableName)) {
+                updateTableRegions(tableName);
+            }
+            
+            List<String> servers = tableRegions.get(tableName);
+            if (servers == null || servers.isEmpty()) {
+                return Message.createErrorResponse("client", "user", "找不到表所在的RegionServer: " + tableName);
+            }
+            
+            // 在所有RegionServer上执行删除，确保所有分片都得到更新
+            Map<String, Exception> exceptions = new HashMap<>();
+            Map<String, Integer> deleteCounts = new HashMap<>();
+            boolean hasSuccess = false;
+            
+            for (String regionServer : servers) {
+                try {
+                    RegionService regionService = RPCUtils.getRegionService(regionServer);
+                    Message response = regionService.delete(tableName, conditions);
+                    
+                    // 记录删除成功的服务器和删除的记录数
+                    if (response.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
+                        hasSuccess = true;
+                        int count = (Integer) response.getData("deletedCount");
+                        deleteCounts.put(regionServer, count);
+                        if (count > 0) {
+                            System.out.println("RegionServer " + regionServer + " 删除了 " + count + " 条记录");
+                        }
+                    } else {
+                        String error = (String) response.getData("error");
+                        exceptions.put(regionServer, new Exception(error));
+                    }
+                } catch (Exception e) {
+                    exceptions.put(regionServer, e);
+                    System.err.println("RegionServer " + regionServer + " 删除失败: " + e.getMessage());
+                    
+                    // 从缓存中移除
+                    RPCUtils.removeFromCache("region:" + regionServer);
+                }
+            }
+            
+            // 根据删除结果返回消息
+            if (hasSuccess) {
+                // 计算总共删除的记录数
+                int totalDeleted = deleteCounts.values().stream().mapToInt(Integer::intValue).sum();
+                
+                // 即使部分服务器失败，只要有成功的就返回成功
+                Message response = Message.createSuccessResponse("client", "user");
+                response.setData("deletedCount", totalDeleted);
+                
+                // 如果有服务器失败，添加警告信息
+                if (!exceptions.isEmpty()) {
+                    StringBuilder warning = new StringBuilder("警告：部分RegionServer删除失败: ");
+                    for (Map.Entry<String, Exception> entry : exceptions.entrySet()) {
+                        warning.append(entry.getKey()).append("(").append(entry.getValue().getMessage()).append("); ");
+                    }
+                    response.setData("warning", warning.toString());
+                }
+                
+                return response;
+            } else {
+                // 所有服务器都失败
+                StringBuilder errorMsg = new StringBuilder("删除数据失败: ");
+                for (Map.Entry<String, Exception> entry : exceptions.entrySet()) {
+                    errorMsg.append(entry.getKey()).append("(").append(entry.getValue().getMessage()).append("); ");
+                }
+                return Message.createErrorResponse("client", "user", errorMsg.toString());
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return Message.createErrorResponse("client", "user", "删除数据失败: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public Message insert(String tableName, Map<String, Object> values) {
+        try {
+            // 获取表区域信息
+            if (!tableRegions.containsKey(tableName)) {
+                updateTableRegions(tableName);
+            }
+            
+            List<String> servers = tableRegions.get(tableName);
+            if (servers == null || servers.isEmpty()) {
+                return Message.createErrorResponse("client", "user", "找不到表所在的RegionServer: " + tableName);
+            }
+            
+            // 获取表的主键信息
+            Metadata.TableInfo tableInfo = null;
+            List<Metadata.TableInfo> tables = getAllTables();
+            for (Metadata.TableInfo table : tables) {
+                if (table.getTableName().equals(tableName)) {
+                    tableInfo = table;
+                    break;
+                }
+            }
+            
+            if (tableInfo == null) {
+                return Message.createErrorResponse("client", "user", "表不存在: " + tableName);
+            }
+            
+            // 获取表的主键
+            String primaryKeyColumn = tableInfo.getPrimaryKey();
+            if (primaryKeyColumn == null) {
+                return Message.createErrorResponse("client", "user", "表没有主键，无法确定分片位置");
+            }
+            
+            // 获取主键值
+            Object primaryKeyValue = values.get(primaryKeyColumn);
+            if (primaryKeyValue == null) {
+                return Message.createErrorResponse("client", "user", "主键值不能为空");
+            }
+            
+            // 获取所有RegionServer列表
+            List<String> allServers = getAllRegionServers();
+            
+            // 识别备份服务器 - 按名称排序后的最后一个
+            Common.HashShardingStrategy shardingStrategy = new Common.HashShardingStrategy();
+            String backupServer = shardingStrategy.getBackupServer(allServers);
+            
+            // 获取用于数据分片的服务器列表（排除备份服务器）
+            List<String> shardingServers = shardingStrategy.getShardingServers(servers);
+            
+            // 如果没有服务器用于分片，使用所有服务器
+            if (shardingServers.isEmpty()) {
+                shardingServers = new ArrayList<>(servers);
+            }
+            
+            // 使用分片策略确定该数据应该存储在哪个RegionServer
+            String targetServer = shardingStrategy.getServerForKey(primaryKeyValue, shardingServers);
+            
+            if (targetServer == null) {
+                return Message.createErrorResponse("client", "user", "无法确定数据分片位置");
+            }
+            
+            // 跟踪插入状态
+            boolean primaryInsertSuccess = false;
+            boolean backupInsertSuccess = false;
+            String primaryError = null;
+            String backupError = null;
+            
+            // 1. 首先插入到主分片服务器
+            try {
+                RegionService regionService = RPCUtils.getRegionService(targetServer);
+                Message response = regionService.insert(tableName, values);
+                
+                if (response.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
+                    primaryInsertSuccess = true;
+                    System.out.println("数据已成功插入到主分片: " + targetServer);
+                } else {
+                    primaryError = response.getData("error") != null ? 
+                                 response.getData("error").toString() : "未知错误";
+                }
+            } catch (Exception e) {
+                primaryError = e.getMessage();
+                System.err.println("插入到主分片 " + targetServer + " 失败: " + e.getMessage());
+                RPCUtils.removeFromCache("region:" + targetServer);
+            }
+            
+            // 2. 如果存在备份服务器，总是向备份服务器插入完整数据
+            if (backupServer != null && servers.contains(backupServer)) {
+                try {
+                    RegionService backupService = RPCUtils.getRegionService(backupServer);
+                    Message backupResponse = backupService.insert(tableName, values);
+                    
+                    if (backupResponse.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
+                        backupInsertSuccess = true;
+                        System.out.println("数据已备份到服务器: " + backupServer);
+                    } else {
+                        backupError = backupResponse.getData("error") != null ? 
+                                   backupResponse.getData("error").toString() : "未知错误";
+                    }
+                } catch (Exception e) {
+                    backupError = e.getMessage();
+                    System.err.println("备份数据到服务器 " + backupServer + " 失败: " + e.getMessage());
+                    RPCUtils.removeFromCache("region:" + backupServer);
+                }
+            } else {
+                // 如果没有专用备份服务器，尝试复制到另一个分片服务器
+                List<String> otherServers = new ArrayList<>(shardingServers);
+                otherServers.remove(targetServer);
+                
+                if (!otherServers.isEmpty()) {
+                    String replicaServer = otherServers.get(0); // 选择第一个其他服务器作为备份
+                    try {
+                        RegionService replicaService = RPCUtils.getRegionService(replicaServer);
+                        Message replicaResponse = replicaService.insert(tableName, values);
+                        
+                        if (replicaResponse.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
+                            backupInsertSuccess = true;
+                            System.out.println("数据已备份到服务器: " + replicaServer);
+                        } else {
+                            backupError = replicaResponse.getData("error") != null ? 
+                                       replicaResponse.getData("error").toString() : "未知错误";
+                        }
+                    } catch (Exception e) {
+                        backupError = e.getMessage();
+                        System.err.println("备份数据到服务器 " + replicaServer + " 失败: " + e.getMessage());
+                    }
+                }
+            }
+            
+            // 3. 根据插入结果返回适当的消息
+            if (primaryInsertSuccess) {
+                Message response = Message.createSuccessResponse("client", "user");
+                
+                // 如果备份失败，添加警告信息
+                if (!backupInsertSuccess) {
+                    response.setData("warning", "数据已成功插入，但备份失败: " + backupError);
+                }
+                
+                return response;
+            } else if (backupInsertSuccess) {
+                // 主分片失败但备份成功，仍然算作成功但有警告
+                Message response = Message.createSuccessResponse("client", "user");
+                response.setData("warning", "数据已成功备份，但主分片插入失败: " + primaryError);
+                return response;
+            } else {
+                // 所有尝试都失败
+                return Message.createErrorResponse("client", "user", 
+                    "插入数据失败: 主分片错误(" + primaryError + "), 备份错误(" + backupError + ")");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return Message.createErrorResponse("client", "user", "插入数据失败: " + e.getMessage());
+        }
     }
 } 
