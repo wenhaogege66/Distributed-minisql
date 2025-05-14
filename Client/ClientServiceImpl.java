@@ -1035,7 +1035,10 @@ public class ClientServiceImpl implements ClientService {
      */
     private void executeSelect(String sql) throws RemoteException {
         // 解析SELECT语句
-        Pattern pattern = Pattern.compile("SELECT\\s+(.+?)\\s+FROM\\s+(\\w+)(?:\\s+WHERE\\s+(.+?))?;?", Pattern.CASE_INSENSITIVE);
+        Pattern pattern = Pattern.compile(
+                "^SELECT\\s+(.+?)\\s+FROM\\s+(\\w+)(?:\\s+WHERE\\s+(.+?))?;?\\s*$",
+                Pattern.CASE_INSENSITIVE
+        );
         Matcher matcher = pattern.matcher(sql);
         
         if (!matcher.find()) {
@@ -1302,61 +1305,101 @@ public class ClientServiceImpl implements ClientService {
                 return Message.createErrorResponse("client", "user", "找不到表所在的RegionServer: " + tableName);
             }
             
-            // 尝试每个RegionServer，直到全部成功或全部失败
-            List<String> unavailableServers = new ArrayList<>();
-            Exception lastException = null;
-
-            boolean if_insert = false;
-            for (String regionServer : servers) {
-                try {
-                    RegionService regionService = RPCUtils.getRegionService(regionServer);
-                    Message response = regionService.insert(tableName, values);
-                    if_insert = true;
-                } catch (Exception e) {
-                    unavailableServers.add(regionServer);
-                    lastException = e;
-                    System.err.println("RegionServer " + regionServer + " 插入失败: " + e.getMessage());
-                    
-                    // 从缓存中移除
-                    RPCUtils.removeFromCache("region:" + regionServer);
+            // 获取表的主键信息
+            Metadata.TableInfo tableInfo = null;
+            List<Metadata.TableInfo> tables = getAllTables();
+            for (Metadata.TableInfo table : tables) {
+                if (table.getTableName().equals(tableName)) {
+                    tableInfo = table;
+                    break;
                 }
             }
-
-            if (if_insert) {
-                // 如果至少有一个region插入成功，返回结果
-                return Message.createSuccessResponse("regions", "client");
+            
+            if (tableInfo == null) {
+                return Message.createErrorResponse("client", "user", "表不存在: " + tableName);
             }
             
-            // 所有服务器都失败，尝试从Master更新表区域信息
-            if (unavailableServers.size() == servers.size()) {
-                try {
-                    System.out.println("所有RegionServer不可用，尝试更新表区域信息");
-                    updateTableRegions(tableName);
-                    
-                    // 获取更新后的服务器列表
-                    List<String> updatedServers = tableRegions.get(tableName);
-                    if (updatedServers != null && !updatedServers.isEmpty()) {
-                        for (String server : updatedServers) {
-                            if (!unavailableServers.contains(server)) {
+            // 获取表的主键
+            String primaryKeyColumn = null;
+            // 先获取表定义的主键
+            primaryKeyColumn = tableInfo.getPrimaryKey();
+            
+            if (primaryKeyColumn == null) {
+                return Message.createErrorResponse("client", "user", "表没有主键，无法确定分片位置");
+            }
+            
+            // 获取主键值
+            Object primaryKeyValue = values.get(primaryKeyColumn);
+            if (primaryKeyValue == null) {
+                return Message.createErrorResponse("client", "user", "主键值不能为空");
+            }
+            
+            // 使用分片策略确定该数据应该存储在哪个RegionServer
+            Common.ShardingStrategy shardingStrategy = new Common.HashShardingStrategy();
+            String targetServer = shardingStrategy.getServerForKey(primaryKeyValue, servers);
+            
+            if (targetServer == null) {
+                return Message.createErrorResponse("client", "user", "无法确定数据分片位置");
+            }
+            
+            try {
+                // 连接到目标RegionServer
+                RegionService regionService = RPCUtils.getRegionService(targetServer);
+                Message response = regionService.insert(tableName, values);
+                
+                // 如果成功插入到主分片，还需要插入备份
+                if (response.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
+                    // 1. 插入到备份服务器（如果存在3个或更多RegionServer）
+                    if (servers.size() >= 3) {
+                        // 获取所有RegionServer列表
+                        List<String> allServers = getAllRegionServers();
+                        
+                        if (allServers.size() >= 3) {
+                            // 获取备份服务器（通常是按名称排序后的最后一个服务器）
+                            List<String> backupServers = new ArrayList<>(allServers);
+                            Collections.sort(backupServers);
+                            String backupServer = backupServers.get(backupServers.size() - 1);
+                            
+                            // 如果备份服务器与目标服务器不同，则进行备份
+                            if (!backupServer.equals(targetServer)) {
                                 try {
-                                    RegionService regionService = RPCUtils.getRegionService(server);
-                                    return regionService.insert(tableName, values);
+                                    RegionService backupService = RPCUtils.getRegionService(backupServer);
+                                    backupService.insert(tableName, values);
+                                    System.out.println("数据已备份到服务器: " + backupServer);
                                 } catch (Exception e) {
-                                    System.err.println("更新后的RegionServer " + server + " 插入失败: " + e.getMessage());
+                                    System.err.println("备份数据到服务器 " + backupServer + " 失败: " + e.getMessage());
                                 }
                             }
                         }
                     }
-                } catch (Exception e) {
-                    System.err.println("更新表区域信息失败: " + e.getMessage());
+                    
+                    return response;
+                } else {
+                    return response;
                 }
-            }
-            
-            // 如果到这里，说明所有尝试都失败了
-            if (lastException != null) {
+            } catch (Exception e) {
+                // 失败后尝试其他服务器
+                System.err.println("RegionServer " + targetServer + " 插入失败: " + e.getMessage());
+                RPCUtils.removeFromCache("region:" + targetServer);
+                
+                // 尝试任何其他可用的服务器
+                Exception lastException = e;
+                for (String server : servers) {
+                    if (!server.equals(targetServer)) {
+                        try {
+                            RegionService regionService = RPCUtils.getRegionService(server);
+                            return regionService.insert(tableName, values);
+                        } catch (Exception ex) {
+                            lastException = ex;
+                            System.err.println("RegionServer " + server + " 插入失败: " + ex.getMessage());
+                            RPCUtils.removeFromCache("region:" + server);
+                        }
+                    }
+                }
+                
+                // 所有尝试都失败
                 return Message.createErrorResponse("client", "user", "插入数据失败: " + lastException.getMessage());
             }
-            return Message.createErrorResponse("client", "user", "插入数据失败: 所有RegionServer不可用");
         } catch (Exception e) {
             e.printStackTrace();
             return Message.createErrorResponse("client", "user", "插入数据失败: " + e.getMessage());
@@ -1598,10 +1641,12 @@ public class ClientServiceImpl implements ClientService {
 
                         // 调用RegionServer查询数据
                         List<Map<String, Object>> result = regionService.select(tableName, columns, conditions);
-                        System.out.println("成功从表 " + tableName + " 查询 " + result.size() + " 条记录");
-                        
-                        // 将结果添加到总结果集
-                        allResults.addAll(result);
+                        // 只有当结果不为空时才打印
+                        if (result != null && !result.isEmpty()) {
+                            System.out.println("成功从表 " + tableName + " 查询 " + result.size() + " 条记录");
+                            // 将结果添加到总结果集
+                            allResults.addAll(result);
+                        }
                     }
                 } catch (Exception e) {
                     unavailableServers.add(regionServer);
@@ -1627,7 +1672,9 @@ public class ClientServiceImpl implements ClientService {
                                 try {
                                     RegionService regionService = RPCUtils.getRegionService(server);
                                     List<Map<String, Object>> result = regionService.select(tableName, columns, conditions);
-                                    allResults.addAll(result);
+                                    if (result != null && !result.isEmpty()) {
+                                        allResults.addAll(result);
+                                    }
                                 } catch (Exception e) {
                                     System.err.println("更新后的RegionServer " + server + " 查询失败: " + e.getMessage());
                                 }
@@ -1639,12 +1686,58 @@ public class ClientServiceImpl implements ClientService {
                 }
             }
             
-            return allResults;
+            // 对结果进行去重
+            List<Map<String, Object>> uniqueResults = removeDuplicates(allResults);
+            
+            return uniqueResults;
         } catch (Exception e) {
             e.printStackTrace();
             System.err.println("查询数据失败: " + e.getMessage());
             return new ArrayList<>();
         }
+    }
+    
+    /**
+     * 移除结果集中的重复数据
+     */
+    private List<Map<String, Object>> removeDuplicates(List<Map<String, Object>> results) {
+        if (results == null || results.isEmpty()) {
+            return results;
+        }
+        
+        // 使用LinkedHashSet保持顺序的同时去重
+        Set<String> seenItems = new HashSet<>();
+        List<Map<String, Object>> uniqueList = new ArrayList<>();
+        
+        for (Map<String, Object> row : results) {
+            // 将行转换为唯一的字符串表示
+            String rowKey = generateRowKey(row);
+            if (!seenItems.contains(rowKey)) {
+                seenItems.add(rowKey);
+                uniqueList.add(row);
+            }
+        }
+        
+        return uniqueList;
+    }
+    
+    /**
+     * 为行数据生成唯一键
+     */
+    private String generateRowKey(Map<String, Object> row) {
+        StringBuilder sb = new StringBuilder();
+        // 按键排序，确保相同数据生成相同的键
+        List<String> keys = new ArrayList<>(row.keySet());
+        Collections.sort(keys);
+        
+        for (String key : keys) {
+            Object value = row.get(key);
+            sb.append(key).append("=");
+            sb.append(value == null ? "null" : value.toString());
+            sb.append(";");
+        }
+        
+        return sb.toString();
     }
 
     /**

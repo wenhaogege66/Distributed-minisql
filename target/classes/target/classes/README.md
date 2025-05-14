@@ -199,7 +199,7 @@ mvn clean package
 
    -- 查询特定分片的数据（语法：SELECT FROM SHARD <server:port> <columns> FROM <table> [WHERE <conditions>]）
    -- 假设DESKTOP-XXX:9000是其中一个分片
-   SELECT FROM SHARD DESKTOP-XXX:9000 * FROM shard_test;
+   SELECT FROM SHARD DESKTOP-RJS0D8P:9001 * FROM shard_test;
    ```
 
 ### 容错测试

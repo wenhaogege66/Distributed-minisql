@@ -97,6 +97,7 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
                                     
                                     // 创建表存储
                                     TableStorage tableStorage = new TableStorage(tableName);
+                                    tableStorage.setDataRootDir(DATA_ROOT_DIR);
                                     tableStorage.initialize(info);
                                     tableStorage.loadData(); // 加载已有数据
                                     tableStorages.put(tableName, tableStorage);
@@ -215,6 +216,7 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             
             // 创建表存储
             TableStorage tableStorage = new TableStorage(tableName);
+            tableStorage.setDataRootDir(DATA_ROOT_DIR);
             tableStorage.initialize(tableInfo);
             
             // 保存表存储和元数据
@@ -731,6 +733,7 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
         private transient File dataFile;
         private transient Map<String, File> indexFiles;
         private List<Map<String, Object>> data; // 内存中的数据
+        private String dataRootDir; // 存储数据根目录路径
         
         public TableStorage(String tableName) {
             this.tableName = tableName;
@@ -739,11 +742,18 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
         }
         
         /**
+         * 设置数据根目录
+         */
+        public void setDataRootDir(String dataRootDir) {
+            this.dataRootDir = dataRootDir;
+        }
+        
+        /**
          * 初始化表存储
          */
         public void initialize(Metadata.TableInfo tableInfo) throws IOException, ClassNotFoundException {
             // 创建数据文件
-            String tableDir = DATA_ROOT_DIR + "/" + tableName;
+            String tableDir = dataRootDir + "/" + tableName;
             File dir = new File(tableDir);
             if (!dir.exists()) {
                 dir.mkdirs();
@@ -797,7 +807,7 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             String indexName = indexInfo.getIndexName();
             
             // 创建索引文件
-            String indexDir = DATA_ROOT_DIR + "/" + tableName + "/indexes";
+            String indexDir = dataRootDir + "/" + tableName + "/indexes";
             File dir = new File(indexDir);
             if (!dir.exists()) {
                 dir.mkdirs();
@@ -1069,32 +1079,56 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
                 return false;
             }
             
-            // 直接尝试整数比较 - 这是最常见的主键类型
-            if (obj1 instanceof Integer || obj2 instanceof Integer) {
+            // 如果两个对象类型相同且equals方法返回true，则认为相等
+            if (obj1.getClass() == obj2.getClass() && obj1.equals(obj2)) {
+                return true;
+            }
+            
+            // 数字类型特殊处理，允许不同类型的数字比较
+            if (obj1 instanceof Number && obj2 instanceof Number) {
+                // 对于整数类型的值，比较它们的long值
+                if ((obj1 instanceof Integer || obj1 instanceof Long || obj1 instanceof Short || obj1 instanceof Byte) &&
+                    (obj2 instanceof Integer || obj2 instanceof Long || obj2 instanceof Short || obj2 instanceof Byte)) {
+                    return ((Number)obj1).longValue() == ((Number)obj2).longValue();
+                }
+                
+                // 对于浮点类型，比较它们的double值
+                return ((Number)obj1).doubleValue() == ((Number)obj2).doubleValue();
+            }
+            
+            // 尝试字符串与数字之间的比较
+            if (obj1 instanceof String && obj2 instanceof Number) {
                 try {
-                    int val1 = (obj1 instanceof Integer) ? (Integer)obj1 : Integer.parseInt(obj1.toString());
-                    int val2 = (obj2 instanceof Integer) ? (Integer)obj2 : Integer.parseInt(obj2.toString());
-                    return val1 == val2;
-                } catch (Exception e) {
-                    // 失败则继续其他比较方式
+                    if (obj2 instanceof Integer || obj2 instanceof Long || obj2 instanceof Short || obj2 instanceof Byte) {
+                        long val1 = Long.parseLong((String)obj1);
+                        long val2 = ((Number)obj2).longValue();
+                        return val1 == val2;
+                    } else {
+                        double val1 = Double.parseDouble((String)obj1);
+                        double val2 = ((Number)obj2).doubleValue();
+                        return val1 == val2;
+                    }
+                } catch (NumberFormatException e) {
+                    // 转换失败，不相等
+                    return false;
                 }
             }
             
-            // 浮点数比较
-            if (obj1 instanceof Float || obj1 instanceof Double || 
-                obj2 instanceof Float || obj2 instanceof Double) {
+            if (obj2 instanceof String && obj1 instanceof Number) {
                 try {
-                    double val1 = (obj1 instanceof Number) ? ((Number)obj1).doubleValue() : Double.parseDouble(obj1.toString());
-                    double val2 = (obj2 instanceof Number) ? ((Number)obj2).doubleValue() : Double.parseDouble(obj2.toString());
-                    return Math.abs(val1 - val2) < 0.0001;
-                } catch (Exception e) {
-                    // 失败则继续其他比较方式
+                    if (obj1 instanceof Integer || obj1 instanceof Long || obj1 instanceof Short || obj1 instanceof Byte) {
+                        long val2 = Long.parseLong((String)obj2);
+                        long val1 = ((Number)obj1).longValue();
+                        return val1 == val2;
+                    } else {
+                        double val2 = Double.parseDouble((String)obj2);
+                        double val1 = ((Number)obj1).doubleValue();
+                        return val1 == val2;
+                    }
+                } catch (NumberFormatException e) {
+                    // 转换失败，不相等
+                    return false;
                 }
-            }
-            
-            // 类型相同直接比较
-            if (obj1.getClass() == obj2.getClass()) {
-                return obj1.equals(obj2);
             }
             
             // 最后尝试字符串比较
