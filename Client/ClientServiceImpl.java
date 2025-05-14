@@ -643,6 +643,10 @@ public class ClientServiceImpl implements ClientService {
         } else {
             int idx = 1;
             for (String server : shards) {
+                if(masterService.getBackupServer(tableName).equals(server))
+                {
+                    continue;
+                }
                 System.out.println("分片 #" + idx + ": " + server);
                 idx++;
             }

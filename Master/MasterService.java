@@ -78,4 +78,9 @@ public interface MasterService extends Remote {
      * 获取表信息
      */
     Metadata.TableInfo getTableInfo(String tableName) throws RemoteException;
+
+    /**
+     * 获取表备份的RegionServer信息
+     */
+    String getBackupServer(String tableName) throws RemoteException;
 } 

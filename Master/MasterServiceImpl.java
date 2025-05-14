@@ -34,7 +34,10 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
     
     // 表区域映射
     private Map<String, Metadata.TableRegionInfo> tableRegions;
-    
+
+    // 表备份映射
+    private Map<String,String> backupServers;
+
     // RegionServer管理
     private Map<String, String> regionServers; // key: hostname:port, value: status
     
@@ -53,6 +56,7 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
         tables = new ConcurrentHashMap<>();
         tableRegions = new ConcurrentHashMap<>();
         regionServers = new ConcurrentHashMap<>();
+        backupServers = new ConcurrentHashMap<>();
         
         // 初始化分片策略
         shardingStrategy = new HashShardingStrategy(2); // 每个表2个副本
@@ -239,6 +243,7 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
                         } else {
                             // 打印服务器角色信息
                             if (backupServer != null && server.equals(backupServer)) {
+                                backupServers.put(tableName, server);
                                 System.out.println("表 " + tableName + " 已在备份服务器 " + server + " 上创建");
                             } else {
                                 System.out.println("表 " + tableName + " 已在分片服务器 " + server + " 上创建");
@@ -578,7 +583,12 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
     public Metadata.TableInfo getTableInfo(String tableName) throws RemoteException {
         return tables.get(tableName);
     }
-    
+
+    @Override
+    public String getBackupServer(String tableName) throws RemoteException {
+        return backupServers.get(tableName);
+    }
+
     /**
      * 获取表区域信息
      */
