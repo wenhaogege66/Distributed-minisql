@@ -10,20 +10,36 @@ import java.util.Map;
 public interface ShardingStrategy extends Serializable {
     
     /**
-     * 根据主键值确定数据应该存储在哪个RegionServer
+     * 根据主键获取服务器
      * @param key 主键值
-     * @param availableServers 可用的RegionServer列表
-     * @return 选择的RegionServer
+     * @param availableServers 可用的服务器列表
+     * @return 选择的服务器
      */
     String getServerForKey(Object key, List<String> availableServers);
     
     /**
-     * 创建新表时选择RegionServer
+     * 获取数据复制的服务器列表
+     * @param primaryServer 主服务器
+     * @param availableServers 可用的服务器列表
+     * @return 选择的服务器列表（不包括主服务器）
+     */
+    List<String> getServersForReplication(String primaryServer, List<String> availableServers);
+    
+    /**
+     * 为新表选择服务器
      * @param tableName 表名
-     * @param availableServers 可用的RegionServer列表
-     * @param serverLoadMap 服务器负载情况 (server -> 表数量)
-     * @return 选择的RegionServer列表
+     * @param availableServers 可用的服务器列表 
+     * @param serverLoadMap 服务器负载映射
+     * @return 选择的服务器列表
      */
     List<String> selectServersForNewTable(String tableName, List<String> availableServers, 
                                          Map<String, Integer> serverLoadMap);
+    
+    /**
+     * 获取复制因子
+     * @return 复制因子
+     */
+    default int getReplicationFactor() {
+        return 2; // 默认复制因子为2
+    }
 } 

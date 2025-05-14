@@ -165,27 +165,67 @@ public class FailureDetector implements Watcher {
             // 从表区域信息中移除故障的RegionServer
             regionInfo.removeRegionServer(failedServer);
             
+            // 识别备份服务器 - 按名称排序后的最后一个服务器
+            List<String> allServers = masterService.getAllRegionServers();
+            String backupServer = null;
+            
+            if (allServers.size() >= 3) {
+                List<String> sortedServers = new ArrayList<>(allServers);
+                Collections.sort(sortedServers);
+                backupServer = sortedServers.get(sortedServers.size() - 1);
+            }
+            
             // 根据负载选择新的RegionServer
-            String newServer = selectLeastLoadedServer(availableServers, serverLoads);
+            String newServer = null;
+            
+            if (backupServer != null && availableServers.contains(backupServer) && 
+                !regionInfo.getRegionServers().contains(backupServer)) {
+                // 如果备份服务器可用且不在当前表的RegionServer列表中，则可能是备份服务器可以作为源
+                System.out.println("检测到可用的备份服务器: " + backupServer);
+                newServer = selectLeastLoadedServer(availableServers, serverLoads, backupServer);
+            } else {
+                // 常规选择最低负载的服务器
+                newServer = selectLeastLoadedServer(availableServers, serverLoads, null);
+            }
+            
             if (newServer == null) {
                 System.err.println("无法找到合适的RegionServer恢复表 " + tableName);
                 return;
             }
             
-            // 向新的RegionServer复制表数据
-            // 首先找到表的其他副本所在的RegionServer
-            List<String> currentServers = regionInfo.getRegionServers();
+            // 确定源服务器（数据从哪里恢复）
             String sourceServer = null;
             
-            for (String server : currentServers) {
-                if (!server.equals(failedServer)) {
-                    sourceServer = server;
-                    break;
+            // 优先使用备份服务器作为数据源
+            if (backupServer != null && availableServers.contains(backupServer)) {
+                // 检查备份服务器是否有这个表
+                try {
+                    RegionService backupService = RPCUtils.getRegionService(backupServer);
+                    if (backupService != null) {
+                        List<Map<String, Object>> data = backupService.getAllTableData(tableName);
+                        if (data != null && !data.isEmpty()) {
+                            sourceServer = backupServer;
+                            System.out.println("从备份服务器 " + backupServer + " 恢复表 " + tableName);
+                        }
+                    }
+                } catch (Exception e) {
+                    System.err.println("检查备份服务器 " + backupServer + " 数据时出错: " + e.getMessage());
+                }
+            }
+            
+            // 如果备份服务器不可用或没有数据，尝试从其他正常的RegionServer恢复
+            if (sourceServer == null) {
+                List<String> currentServers = regionInfo.getRegionServers();
+                for (String server : currentServers) {
+                    if (!server.equals(failedServer)) {
+                        sourceServer = server;
+                        break;
+                    }
                 }
             }
             
             if (sourceServer == null) {
-                System.err.println("找不到表 " + tableName + " 的其他副本");
+                System.err.println("找不到表 " + tableName + " 的可用数据源");
                 return;
             }
             
@@ -258,15 +298,25 @@ public class FailureDetector implements Watcher {
     /**
      * 选择负载最低的RegionServer
      */
-    private String selectLeastLoadedServer(List<String> availableServers, Map<String, Integer> serverLoads) {
+    private String selectLeastLoadedServer(List<String> availableServers, 
+                                          Map<String, Integer> serverLoads,
+                                          String excludeServer) {
         if (availableServers.isEmpty()) {
             return null;
         }
         
-        String leastLoadedServer = availableServers.get(0);
+        List<String> servers = new ArrayList<>(availableServers);
+        if (excludeServer != null) {
+            servers.remove(excludeServer);
+            if (servers.isEmpty()) {
+                return null;
+            }
+        }
+        
+        String leastLoadedServer = servers.get(0);
         int minLoad = serverLoads.getOrDefault(leastLoadedServer, 0);
         
-        for (String server : availableServers) {
+        for (String server : servers) {
             int load = serverLoads.getOrDefault(server, 0);
             if (load < minLoad) {
                 minLoad = load;

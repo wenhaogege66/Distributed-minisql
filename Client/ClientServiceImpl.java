@@ -1489,20 +1489,30 @@ public class ClientServiceImpl implements ClientService {
                 return Message.createErrorResponse("client", "user", "找不到表所在的RegionServer: " + tableName);
             }
             
-            // 尝试每个RegionServer，直到成功或全部失败
-            List<String> unavailableServers = new ArrayList<>();
-            Exception lastException = null;
+            // 在所有RegionServer上执行更新，确保所有分片都得到更新
+            Map<String, Exception> exceptions = new HashMap<>();
+            Map<String, Integer> updateCounts = new HashMap<>();
+            boolean hasSuccess = false;
             
             for (String regionServer : servers) {
                 try {
                     RegionService regionService = RPCUtils.getRegionService(regionServer);
                     Message response = regionService.update(tableName, values, conditions);
                     
-                    // 更新成功，返回结果
-                    return response;
+                    // 记录更新成功的服务器和更新的记录数
+                    if (response.getType() == Common.Message.MessageType.RESPONSE_SUCCESS) {
+                        hasSuccess = true;
+                        int count = (Integer) response.getData("updatedCount");
+                        updateCounts.put(regionServer, count);
+                        if (count > 0) {
+                            System.out.println("RegionServer " + regionServer + " 更新了 " + count + " 条记录");
+                        }
+                    } else {
+                        String error = (String) response.getData("error");
+                        exceptions.put(regionServer, new Exception(error));
+                    }
                 } catch (Exception e) {
-                    unavailableServers.add(regionServer);
-                    lastException = e;
+                    exceptions.put(regionServer, e);
                     System.err.println("RegionServer " + regionServer + " 更新失败: " + e.getMessage());
                     
                     // 从缓存中移除
@@ -1510,36 +1520,33 @@ public class ClientServiceImpl implements ClientService {
                 }
             }
             
-            // 所有服务器都失败，尝试从Master更新表区域信息
-            if (unavailableServers.size() == servers.size()) {
-                try {
-                    System.out.println("所有RegionServer不可用，尝试更新表区域信息");
-                    updateTableRegions(tableName);
-                    
-                    // 获取更新后的服务器列表
-                    List<String> updatedServers = tableRegions.get(tableName);
-                    if (updatedServers != null && !updatedServers.isEmpty()) {
-                        for (String server : updatedServers) {
-                            if (!unavailableServers.contains(server)) {
-                                try {
-                                    RegionService regionService = RPCUtils.getRegionService(server);
-                                    return regionService.update(tableName, values, conditions);
-                                } catch (Exception e) {
-                                    System.err.println("更新后的RegionServer " + server + " 更新失败: " + e.getMessage());
-                                }
-                            }
-                        }
+            // 根据更新结果返回消息
+            if (hasSuccess) {
+                // 计算总共更新的记录数
+                int totalUpdated = updateCounts.values().stream().mapToInt(Integer::intValue).sum();
+                
+                // 即使部分服务器失败，只要有成功的就返回成功
+                Message response = Message.createSuccessResponse("client", "user");
+                response.setData("updatedCount", totalUpdated);
+                
+                // 如果有服务器失败，添加警告信息
+                if (!exceptions.isEmpty()) {
+                    StringBuilder warning = new StringBuilder("警告：部分RegionServer更新失败: ");
+                    for (Map.Entry<String, Exception> entry : exceptions.entrySet()) {
+                        warning.append(entry.getKey()).append("(").append(entry.getValue().getMessage()).append("); ");
                     }
-                } catch (Exception e) {
-                    System.err.println("更新表区域信息失败: " + e.getMessage());
+                    response.setData("warning", warning.toString());
                 }
+                
+                return response;
+            } else {
+                // 所有服务器都失败
+                StringBuilder errorMsg = new StringBuilder("更新数据失败: ");
+                for (Map.Entry<String, Exception> entry : exceptions.entrySet()) {
+                    errorMsg.append(entry.getKey()).append("(").append(entry.getValue().getMessage()).append("); ");
+                }
+                return Message.createErrorResponse("client", "user", errorMsg.toString());
             }
-            
-            // 如果到这里，说明所有尝试都失败了
-            if (lastException != null) {
-                return Message.createErrorResponse("client", "user", "更新数据失败: " + lastException.getMessage());
-            }
-            return Message.createErrorResponse("client", "user", "更新数据失败: 所有RegionServer不可用");
         } catch (Exception e) {
             e.printStackTrace();
             return Message.createErrorResponse("client", "user", "更新数据失败: " + e.getMessage());

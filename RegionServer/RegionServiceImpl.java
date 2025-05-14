@@ -1092,22 +1092,27 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
                     return ((Number)obj1).longValue() == ((Number)obj2).longValue();
                 }
                 
-                // 对于浮点类型，比较它们的double值
-                return ((Number)obj1).doubleValue() == ((Number)obj2).doubleValue();
+                // 对于整数和浮点数的比较，先转换为double再比较
+                double val1 = ((Number)obj1).doubleValue();
+                double val2 = ((Number)obj2).doubleValue();
+                
+                // 使用近似相等来处理浮点数比较
+                return Math.abs(val1 - val2) < 0.0001;
             }
             
             // 尝试字符串与数字之间的比较
             if (obj1 instanceof String && obj2 instanceof Number) {
                 try {
-                    if (obj2 instanceof Integer || obj2 instanceof Long || obj2 instanceof Short || obj2 instanceof Byte) {
-                        long val1 = Long.parseLong((String)obj1);
-                        long val2 = ((Number)obj2).longValue();
-                        return val1 == val2;
+                    double val1;
+                    // 尝试解析为数字
+                    if (((String)obj1).contains(".")) {
+                        val1 = Double.parseDouble((String)obj1);
                     } else {
-                        double val1 = Double.parseDouble((String)obj1);
-                        double val2 = ((Number)obj2).doubleValue();
-                        return val1 == val2;
+                        val1 = Long.parseLong((String)obj1);
                     }
+                    
+                    double val2 = ((Number)obj2).doubleValue();
+                    return Math.abs(val1 - val2) < 0.0001;
                 } catch (NumberFormatException e) {
                     // 转换失败，不相等
                     return false;
@@ -1116,15 +1121,16 @@ public class RegionServiceImpl extends UnicastRemoteObject implements RegionServ
             
             if (obj2 instanceof String && obj1 instanceof Number) {
                 try {
-                    if (obj1 instanceof Integer || obj1 instanceof Long || obj1 instanceof Short || obj1 instanceof Byte) {
-                        long val2 = Long.parseLong((String)obj2);
-                        long val1 = ((Number)obj1).longValue();
-                        return val1 == val2;
+                    double val2;
+                    // 尝试解析为数字
+                    if (((String)obj2).contains(".")) {
+                        val2 = Double.parseDouble((String)obj2);
                     } else {
-                        double val2 = Double.parseDouble((String)obj2);
-                        double val1 = ((Number)obj1).doubleValue();
-                        return val1 == val2;
+                        val2 = Long.parseLong((String)obj2);
                     }
+                    
+                    double val1 = ((Number)obj1).doubleValue();
+                    return Math.abs(val1 - val2) < 0.0001;
                 } catch (NumberFormatException e) {
                     // 转换失败，不相等
                     return false;

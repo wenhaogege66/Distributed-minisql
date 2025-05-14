@@ -16,6 +16,7 @@ import java.io.*;
 import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -172,8 +173,39 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
             Map<String, Integer> serverLoadMap = calculateServerLoads();
             
             // 使用分片策略选择RegionServer
-            List<String> selectedServers = shardingStrategy.selectServersForNewTable(
-                tableName, allRegionServers, serverLoadMap);
+            List<String> selectedServers = new ArrayList<>();
+            
+            // 1. 获取专用备份服务器
+            String backupServer = null;
+            if (allRegionServers.size() >= 3) {
+                List<String> sortedServers = new ArrayList<>(allRegionServers);
+                Collections.sort(sortedServers);
+                backupServer = sortedServers.get(sortedServers.size() - 1);
+                
+                // 确保备份服务器总是被包含在选中的服务器中
+                selectedServers.add(backupServer);
+            }
+            
+            // 2. 从剩余服务器中选择负载最低的服务器作为数据分片服务器
+            List<String> shardingServers = new ArrayList<>(allRegionServers);
+            if (backupServer != null) {
+                shardingServers.remove(backupServer);
+            }
+            
+            // 按负载排序服务器
+            shardingServers.sort((s1, s2) -> {
+                int load1 = serverLoadMap.getOrDefault(s1, 0);
+                int load2 = serverLoadMap.getOrDefault(s2, 0);
+                return Integer.compare(load1, load2);
+            });
+            
+            // 根据复制因子选择所需的分片服务器数量
+            int shardingCount = Math.min(shardingStrategy.getReplicationFactor() - 
+                                        (backupServer != null ? 1 : 0), shardingServers.size());
+            
+            for (int i = 0; i < shardingCount; i++) {
+                selectedServers.add(shardingServers.get(i));
+            }
             
             if (selectedServers.isEmpty()) {
                 return Message.createErrorResponse("master", "client", "无法找到合适的RegionServer");
@@ -202,6 +234,13 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
                             allSuccess = false;
                             failedServers.add(server);
                             System.err.println("RegionServer " + server + " 创建表失败: " + response.getData("error"));
+                        } else {
+                            // 打印服务器角色信息
+                            if (backupServer != null && server.equals(backupServer)) {
+                                System.out.println("表 " + tableName + " 已在备份服务器 " + server + " 上创建");
+                            } else {
+                                System.out.println("表 " + tableName + " 已在分片服务器 " + server + " 上创建");
+                            }
                         }
                     } else {
                         allSuccess = false;

@@ -27,97 +27,142 @@ public class HashShardingStrategy implements ShardingStrategy {
             return null;
         }
         
-        // 计算键的哈希值
-        int hash = Math.abs(key.hashCode());
-        
         // 获取可用于数据分片的服务器列表（排除备份服务器）
         List<String> shardingServers = getShardingServers(availableServers);
         if (shardingServers.isEmpty()) {
-            // 如果没有用于分片的服务器，则使用所有可用服务器
-            shardingServers = availableServers;
+            // 如果没有足够的服务器进行分片，则使用所有可用服务器
+            shardingServers = new ArrayList<>(availableServers);
         }
         
-        // 使用一致性哈希选择服务器
-        int serverIndex = hash % shardingServers.size();
-        return shardingServers.get(serverIndex);
+        // 计算键的哈希值
+        int hash = Math.abs(key.hashCode());
+        
+        // 使用哈希值选择服务器
+        return shardingServers.get(hash % shardingServers.size());
+    }
+    
+    @Override
+    public List<String> getServersForReplication(String primaryServer, List<String> availableServers) {
+        if (availableServers == null || availableServers.size() <= 1) {
+            return new ArrayList<>();
+        }
+        
+        // 复制可用服务器列表并排序
+        List<String> servers = new ArrayList<>(availableServers);
+        Collections.sort(servers);
+        
+        // 移除主服务器
+        servers.remove(primaryServer);
+        
+        // 确保备份服务器总是在最后位置
+        String backupServer = getBackupServer(availableServers);
+        if (backupServer != null && !backupServer.equals(primaryServer)) {
+            servers.remove(backupServer);
+            servers.add(backupServer);
+        }
+        
+        // 根据复制因子选择服务器
+        int count = Math.min(replicationFactor - 1, servers.size());
+        
+        // 始终包含备份服务器
+        if (backupServer != null && !servers.subList(servers.size() - count, servers.size()).contains(backupServer)) {
+            // 如果备份服务器不在选中列表中，替换最后一个服务器
+            servers.set(servers.size() - 1, backupServer);
+        }
+        
+        return servers.subList(0, count);
     }
     
     @Override
     public List<String> selectServersForNewTable(String tableName, List<String> availableServers, 
-                                               Map<String, Integer> serverLoadMap) {
+                                              Map<String, Integer> serverLoadMap) {
         if (availableServers == null || availableServers.isEmpty()) {
             return new ArrayList<>();
         }
         
-        int serversNeeded = Math.min(replicationFactor, availableServers.size());
-        List<String> selectedServers = new ArrayList<>(serversNeeded);
+        // 使用与目前createTable方法相同的逻辑
+        List<String> selectedServers = new ArrayList<>();
         
-        // 按负载从低到高排序服务器
-        List<Map.Entry<String, Integer>> sortedServers = new ArrayList<>();
-        
-        // 初始化所有服务器的负载数据
-        for (String server : availableServers) {
-            int load = serverLoadMap.getOrDefault(server, 0);
-            sortedServers.add(new AbstractMap.SimpleEntry<>(server, load));
+        // 识别备份服务器（使用排序后的最后一个）
+        String backupServer = null;
+        if (availableServers.size() >= 3) {
+            List<String> sortedServers = new ArrayList<>(availableServers);
+            Collections.sort(sortedServers);
+            backupServer = sortedServers.get(sortedServers.size() - 1);
+            
+            // 确保备份服务器总是被包含在选中的服务器中
+            selectedServers.add(backupServer);
         }
         
-        // 排序服务器 (按负载从低到高)
-        sortedServers.sort(Comparator.comparingInt(Map.Entry::getValue));
+        // 从剩余服务器中选择负载最低的服务器作为数据分片服务器
+        List<String> shardingServers = new ArrayList<>(availableServers);
+        if (backupServer != null) {
+            shardingServers.remove(backupServer);
+        }
         
-        // 获取可用于数据分片的服务器列表（排除备份服务器）
-        List<String> shardingServers = new ArrayList<>();
-        int backupServerCount = 0;
+        // 按负载排序服务器
+        shardingServers.sort((s1, s2) -> {
+            int load1 = serverLoadMap.getOrDefault(s1, 0);
+            int load2 = serverLoadMap.getOrDefault(s2, 0);
+            return Integer.compare(load1, load2);
+        });
         
-        // 如果服务器数量大于等于3，需要保留至少一个服务器用于备份
-        if (availableServers.size() >= 3) {
-            // 先选择备份服务器（通常是负载较低的服务器）
-            for (Map.Entry<String, Integer> entry : sortedServers) {
-                if (backupServerCount < reservedBackupServers) {
-                    // 将这个服务器标记为备份服务器
-                    backupServerCount++;
-                    // 同时也作为数据副本服务器
-                    selectedServers.add(entry.getKey());
-                } else {
-                    // 其余服务器用于分片
-                    shardingServers.add(entry.getKey());
-                }
-                
-                // 如果已选择足够的服务器，退出循环
-                if (selectedServers.size() >= serversNeeded) {
-                    break;
-                }
-            }
-            
-            // 如果还需要更多服务器，从分片服务器中选择
-            while (selectedServers.size() < serversNeeded && !shardingServers.isEmpty()) {
-                selectedServers.add(shardingServers.remove(0));
-            }
-        } else {
-            // 若服务器少于3个，则选择负载最低的服务器
-            for (int i = 0; i < serversNeeded; i++) {
-                selectedServers.add(sortedServers.get(i).getKey());
-            }
+        // 根据复制因子选择所需的分片服务器数量
+        int shardingCount = Math.min(replicationFactor - (backupServer != null ? 1 : 0), shardingServers.size());
+        
+        for (int i = 0; i < shardingCount; i++) {
+            selectedServers.add(shardingServers.get(i));
         }
         
         return selectedServers;
     }
     
+    @Override
+    public int getReplicationFactor() {
+        return replicationFactor;
+    }
+    
+    /**
+     * 获取备份服务器
+     */
+    public String getBackupServer(List<String> availableServers) {
+        if (availableServers == null || availableServers.size() < 3) {
+            return null; // 至少需要3个服务器才能有专用备份
+        }
+        
+        // 复制可用服务器列表并排序
+        List<String> servers = new ArrayList<>(availableServers);
+        Collections.sort(servers);
+        
+        // 返回最后一个服务器作为备份服务器
+        return servers.get(servers.size() - 1);
+    }
+    
     /**
      * 获取可用于数据分片的服务器列表（排除备份服务器）
      */
-    private List<String> getShardingServers(List<String> availableServers) {
-        // 如果服务器数量小于3，所有服务器都可用于分片
-        if (availableServers.size() < 3) {
-            return new ArrayList<>(availableServers);
+    public List<String> getShardingServers(List<String> availableServers) {
+        if (availableServers == null || availableServers.size() <= reservedBackupServers) {
+            return new ArrayList<>(availableServers); // 如果服务器不足，返回所有服务器
         }
         
-        // 否则，排除用于备份的服务器
-        List<String> shardingServers = new ArrayList<>(availableServers);
-        // 按照服务器名称排序，以确保一致性（可以替换为更复杂的策略）
-        Collections.sort(shardingServers);
-        // 移除用于备份的服务器
-        shardingServers.remove(shardingServers.size() - 1);
+        // 复制可用服务器列表并排序
+        List<String> servers = new ArrayList<>(availableServers);
+        Collections.sort(servers);
         
-        return shardingServers;
+        // 移除用于备份的服务器
+        if (servers.size() >= 3) {
+            servers.remove(servers.size() - 1); // 移除最后一个作为备份服务器
+        }
+        
+        return servers;
+    }
+    
+    /**
+     * 检查给定服务器是否为备份服务器
+     */
+    public boolean isBackupServer(String server, List<String> allServers) {
+        String backupServer = getBackupServer(allServers);
+        return backupServer != null && backupServer.equals(server);
     }
 } 
