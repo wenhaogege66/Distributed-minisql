@@ -305,7 +305,7 @@ public class FailureDetector implements Watcher {
                 } else {
                     System.out.println("剩余服务器数量足够，无需添加新服务器");
                     //找出剩下的服务器
-                    List<String> remainShardServers = masterService.getTableRegions(tableName);
+                    List<String> remainShardServers = regionInfo.getRegionServers();
                     //排除备份服务器获取分片服务器（不包含失联服务器）
                     remainShardServers.remove(backupServer);
                     //加入故障服务器得到所有分片服务器
@@ -339,7 +339,7 @@ public class FailureDetector implements Watcher {
                                     //根据分片策略在剩余的服务器上找到存放位置
                                     String newServer = shardingStrategy.getServerForKey(primaryKeyValue, remainShardServers);
                                     RegionService newRegion = RPCUtils.getRegionService(newServer);
-                                    newRegion.insert(tableName, row);
+                                    Message response =  newRegion.insert(tableName, row);
                                     restoredCount++;
                                 }
                             }

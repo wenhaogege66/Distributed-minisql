@@ -33,7 +33,8 @@ public class HashShardingStrategy implements ShardingStrategy {
             // 如果没有足够的服务器进行分片，则使用所有可用服务器
             shardingServers = new ArrayList<>(availableServers);
         }
-        
+
+        Collections.sort(shardingServers);
         // 计算键的哈希值
         int hash = Math.abs(key.hashCode());
         
