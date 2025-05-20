@@ -166,9 +166,15 @@ public class FailureDetector implements Watcher {
             regionInfo.removeRegionServer(failedServer);
             
             // 识别备份服务器 - 按名称排序后的最后一个服务器
-            List<String> allServers = masterService.getAllRegionServers();
+            //List<String> allServers = masterService.getAllRegionServers();
             Common.HashShardingStrategy shardingStrategy = new Common.HashShardingStrategy();
-            String backupServer = shardingStrategy.getBackupServer(allServers);
+            //String backupServer = shardingStrategy.getBackupServer(allServers);
+
+
+            //新构建的根据表名获取备份服务器的方法
+            String backupServer = masterService.getBackupServer(tableName);
+
+
             
             System.out.println("处理表 " + tableName + " 的恢复，故障服务器: " + failedServer);
             System.out.println("备份服务器: " + backupServer);
@@ -298,6 +304,51 @@ public class FailureDetector implements Watcher {
                     }
                 } else {
                     System.out.println("剩余服务器数量足够，无需添加新服务器");
+                    //找出剩下的服务器
+                    List<String> remainShardServers = masterService.getTableRegions(tableName);
+                    //排除备份服务器获取分片服务器（不包含失联服务器）
+                    remainShardServers.remove(backupServer);
+                    //加入故障服务器得到所有分片服务器
+                    List<String> shardServers =new ArrayList<>(remainShardServers);
+                    shardServers.add(failedServer);
+
+                    //从备份服务器恢复数据
+                    try{
+                        RegionService backupRegion = RPCUtils.getRegionService(backupServer);
+
+
+                        List<Map<String, Object>> allData = backupRegion.select(tableName, null, new HashMap<>());
+                        System.out.println("从备份服务器 " + backupServer + " 获取到 " + allData.size() + " 条数据");
+
+                        // 获取表的主键
+                        String primaryKeyColumn = tableInfo.getPrimaryKey();
+                        if (primaryKeyColumn == null) {
+                            System.err.println("表 " + tableName + " 没有主键，无法确定分片数据");
+                            return;
+                        }
+                        System.out.println("开始进行数据恢复");
+                        int restoredCount = 0;
+                        for (Map<String, Object> row : allData) {
+                            Object primaryKeyValue = row.get(primaryKeyColumn);
+                            if (primaryKeyValue != null) {
+                                // 使用与客户端相同的分片逻辑确定数据原本位置
+                                String targetServer = shardingStrategy.getServerForKey(primaryKeyValue, shardServers);
+
+                                //找到原本存放在故障服务器上的数据
+                                if (failedServer.equals(targetServer)) {
+                                    //根据分片策略在剩余的服务器上找到存放位置
+                                    String newServer = shardingStrategy.getServerForKey(primaryKeyValue, remainShardServers);
+                                    RegionService newRegion = RPCUtils.getRegionService(newServer);
+                                    newRegion.insert(tableName, row);
+                                    restoredCount++;
+                                }
+                            }
+                        }
+                        System.out.println("成功将 " + restoredCount + " 条数据从备份服务器 " +
+                                backupServer + " 恢复到其余分片服务器");
+                    }catch (Exception e) {
+                        System.err.println("从备份服务器恢复数据失败: " + e.getMessage());
+                    }
                 }
             }
             
@@ -306,6 +357,7 @@ public class FailureDetector implements Watcher {
             System.out.println("表 " + tableName + " 的恢复过程完成，更新后的服务器列表: " + regionInfo.getRegionServers());
         } catch (Exception e) {
             System.err.println("恢复表 " + tableName + " 失败: " + e.getMessage());
+
             e.printStackTrace();
         }
     }

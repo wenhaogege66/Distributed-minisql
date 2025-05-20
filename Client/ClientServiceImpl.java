@@ -1383,18 +1383,34 @@ public class ClientServiceImpl implements ClientService {
             
             // 从每个RegionServer查询数据
             for (String regionServer : servers) {
-                try {
+                //不应该从备份服务器查询数据
+                if(regionServer.equals(masterService.getBackupServer(tableName))) {
+                    continue;
+                }
+                if(!masterService.getRegionServerStatus(regionServer)) {
+                    unavailableServers.add(regionServer);
+                    System.err.println("RegionServer " + regionServer + " 查询失败" );
+                    // 从缓存中移除
+                    RPCUtils.removeFromCache("region:" + regionServer);
+                }else {
                     RegionService regionService = RPCUtils.getRegionService(regionServer);
                     List<Map<String, Object>> result = regionService.select(tableName, columns, conditions);
                     resultsFromRegions.put(regionServer, result);
-                    System.out.println("成功从表 " + tableName + " 查询 " + result.size() + " 条记录");
-                } catch (Exception e) {
-                    unavailableServers.add(regionServer);
-                    System.err.println("RegionServer " + regionServer + " 查询失败: " + e.getMessage());
-                    
-                    // 从缓存中移除
-                    RPCUtils.removeFromCache("region:" + regionServer);
+                    System.out.println("成功从 " + regionServer + " 查询 " + result.size() + " 条记录");
                 }
+//                //从所有分片服务器上面查询数据
+//                try {
+//                    RegionService regionService = RPCUtils.getRegionService(regionServer);
+//                    List<Map<String, Object>> result = regionService.select(tableName, columns, conditions);
+//                    resultsFromRegions.put(regionServer, result);
+//                    System.out.println("成功从 " + regionServer + " 查询 " + result.size() + " 条记录");
+//                } catch (Exception e) {
+//                    unavailableServers.add(regionServer);
+//                    System.err.println("RegionServer " + regionServer + " 查询失败" );
+//
+//                    // 从缓存中移除
+//                    RPCUtils.removeFromCache("region:" + regionServer);
+//                }
             }
             
             // 合并结果，避免重复数据
