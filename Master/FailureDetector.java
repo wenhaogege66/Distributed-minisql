@@ -183,12 +183,21 @@ public class FailureDetector implements Watcher {
             // 如果失败的服务器是备份服务器，则需要重新指定一个备份服务器
             if (failedServer.equals(backupServer)) {
                 System.out.println("备份服务器 " + backupServer + " 发生故障，需要重新指定新的备份服务器");
+
+
+                //找寻不存在该表的空闲服务器充当新的备份服务器
+                List<String> shardServers = regionInfo.getRegionServers();
+                availableServers.removeAll(shardServers);
+
+
+                //存在空闲服务器
+                if (!availableServers.isEmpty()) {
+
+                    //选择其中之一作为备份服务器
+                    List<String> sortedAvailableServers = new ArrayList<>(availableServers);
+                    Collections.sort(sortedAvailableServers);
                 
-                // 从现有服务器中选择一个新的备份服务器
-                List<String> sortedAvailableServers = new ArrayList<>(availableServers);
-                Collections.sort(sortedAvailableServers);
-                
-                if (!sortedAvailableServers.isEmpty()) {
+
                     String newBackupServer = sortedAvailableServers.get(sortedAvailableServers.size() - 1);
                     System.out.println("选择 " + newBackupServer + " 作为新的备份服务器");
                     
@@ -196,15 +205,19 @@ public class FailureDetector implements Watcher {
                     if (!regionInfo.getRegionServers().contains(newBackupServer)) {
                         regionInfo.addRegionServer(newBackupServer);
                     }
-                    
+
                     // 从所有其他可用的RegionServer收集数据至新的备份服务器
-                    System.out.println("开始从其他服务器收集数据到新备份服务器");
+                    System.out.println("开始从其他分片服务器收集数据到新备份服务器");
+                    //在新的备份服务器上创建表
+                    Metadata.TableInfo tableinfo = masterService.getTableInfo(tableName);
+                    RegionService targetRegion = RPCUtils.getRegionService(newBackupServer);
+                    targetRegion.createTable(tableInfo);
                     
                     for (String server : regionInfo.getRegionServers()) {
                         if (!server.equals(newBackupServer)) {
                             try {
                                 RegionService sourceRegion = RPCUtils.getRegionService(server);
-                                RegionService targetRegion = RPCUtils.getRegionService(newBackupServer);
+
                                 
                                 if (sourceRegion != null && targetRegion != null) {
                                     // 获取源服务器上的所有数据
@@ -222,8 +235,11 @@ public class FailureDetector implements Watcher {
                             }
                         }
                     }
+                    //数据转移完成，更改表的备份信息
+                    masterService.setBackupServer(tableName,newBackupServer);
                 } else {
-                    System.err.println("没有可用服务器可以指定为新的备份服务器");
+                    //不存在空闲服务器
+                    System.err.println("没有空闲服务器可以指定为新的备份服务器");
                 }
             } else {
                 // 如果失败的是普通分片服务器
@@ -252,7 +268,10 @@ public class FailureDetector implements Watcher {
                         
                         // 添加新服务器到区域信息
                         regionInfo.addRegionServer(newServer);
-                        
+                        // 在新的分片服务器上创建表
+                        Metadata.TableInfo tableinfo = masterService.getTableInfo(tableName);
+                        RegionService targetRegion = RPCUtils.getRegionService(newServer);
+                        targetRegion.createTable(tableInfo);
                         // 从备份服务器恢复数据至新服务器
                         if (backupServer != null && !backupServer.equals(failedServer)) {
                             try {
