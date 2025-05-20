@@ -589,16 +589,6 @@ public class MasterServiceImpl extends UnicastRemoteObject implements MasterServ
         return backupServers.get(tableName);
     }
 
-    @Override
-    public Boolean setBackupServer(String tableName, String backupServer) throws RemoteException {
-        if(backupServers.containsKey(tableName)) {
-            backupServers.put(tableName, backupServer);
-            return true;
-        }else {
-            return false;
-        }
-    }
-
     /**
      * 获取表区域信息
      */

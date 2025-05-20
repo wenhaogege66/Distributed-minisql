@@ -83,10 +83,4 @@ public interface MasterService extends Remote {
      * 获取表备份的RegionServer信息
      */
     String getBackupServer(String tableName) throws RemoteException;
-
-    /**
-     * 修改表备份的RegionServer信息
-     */
-    Boolean setBackupServer(String tableName,String backupServer) throws RemoteException;
-
 } 

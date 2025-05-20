@@ -1011,18 +1011,44 @@ public class ClientServiceImpl implements ClientService {
             String[] conditionParts = whereClause.split("AND");
             for (String condition : conditionParts) {
                 condition = condition.trim();
-                String[] parts = condition.split("=");
+                String[] parts = new String[2];
+                String column;
+                String value;
+
+                if(condition.contains("=")) {
+                    parts = condition.split("=");
+
+                }
+                else if(condition.contains(">")) {
+                    parts = condition.split(">");
+
+                }
+                else if(condition.contains("<")) {
+                    parts = condition.split("<");
+
+                }
+
                 if (parts.length == 2) {
-                    String column = parts[0].trim();
-                    String value = parts[1].trim();
-                    
+                    if(condition.contains("=")) {
+                        column = parts[0].trim()+"=";
+                    }
+                    else if(condition.contains(">")) {
+                        column = parts[0].trim()+">";
+                    }
+                    else if(condition.contains("<")) {
+                        column = parts[0].trim()+"<";
+                    }
+                    else {
+                        column = parts[0].trim();
+                    }
+                    value = parts[1].trim();
                     // 去掉引号
                     if (value.startsWith("'") && value.endsWith("'")) {
                         value = value.substring(1, value.length() - 1);
                     } else if (value.startsWith("\"") && value.endsWith("\"")) {
                         value = value.substring(1, value.length() - 1);
                     }
-                    
+
                     // 尝试转换为数值类型
                     Object parsedValue = parseValue(value);
                     conditions.put(column, parsedValue);
@@ -1095,21 +1121,48 @@ public class ClientServiceImpl implements ClientService {
                 conditions.put(columnName + "_range", rangeCondition);
             } else {
                 // 处理普通条件
+
                 String[] conditionParts = whereClause.split("AND");
                 for (String condition : conditionParts) {
                     condition = condition.trim();
-                    String[] parts = condition.split("=");
+                    String[] parts = new String[2];
+                    String column;
+                    String value;
+
+                    if(condition.contains("=")) {
+                        parts = condition.split("=");
+
+                    }
+                    else if(condition.contains(">")) {
+                        parts = condition.split(">");
+
+                    }
+                    else if(condition.contains("<")) {
+                        parts = condition.split("<");
+
+                    }
+
                     if (parts.length == 2) {
-                        String column = parts[0].trim();
-                        String value = parts[1].trim();
-                        
+                        if(condition.contains("=")) {
+                            column = parts[0].trim()+"=";
+                        }
+                        else if(condition.contains(">")) {
+                            column = parts[0].trim()+">";
+                        }
+                        else if(condition.contains("<")) {
+                            column = parts[0].trim()+"<";
+                        }
+                        else {
+                            column = parts[0].trim();
+                        }
+                        value = parts[1].trim();
                         // 去掉引号
                         if (value.startsWith("'") && value.endsWith("'")) {
                             value = value.substring(1, value.length() - 1);
                         } else if (value.startsWith("\"") && value.endsWith("\"")) {
                             value = value.substring(1, value.length() - 1);
                         }
-                        
+
                         // 尝试转换为数值类型
                         Object parsedValue = parseValue(value);
                         conditions.put(column, parsedValue);
@@ -1131,7 +1184,7 @@ public class ClientServiceImpl implements ClientService {
         // 打印结果
         printResult(result);
     }
-    
+
     /**
      * 打印查询结果
      */
@@ -1219,18 +1272,44 @@ public class ClientServiceImpl implements ClientService {
             String[] conditionParts = whereClause.split("AND");
             for (String condition : conditionParts) {
                 condition = condition.trim();
-                String[] parts = condition.split("=");
+                String[] parts = new String[2];
+                String column;
+                String value;
+
+                if(condition.contains("=")) {
+                    parts = condition.split("=");
+
+                }
+                else if(condition.contains(">")) {
+                    parts = condition.split(">");
+
+                }
+                else if(condition.contains("<")) {
+                    parts = condition.split("<");
+
+                }
+
                 if (parts.length == 2) {
-                    String column = parts[0].trim();
-                    String value = parts[1].trim();
-                    
+                    if(condition.contains("=")) {
+                        column = parts[0].trim()+"=";
+                    }
+                    else if(condition.contains(">")) {
+                        column = parts[0].trim()+">";
+                    }
+                    else if(condition.contains("<")) {
+                        column = parts[0].trim()+"<";
+                    }
+                    else {
+                        column = parts[0].trim();
+                    }
+                    value = parts[1].trim();
                     // 去掉引号
                     if (value.startsWith("'") && value.endsWith("'")) {
                         value = value.substring(1, value.length() - 1);
                     } else if (value.startsWith("\"") && value.endsWith("\"")) {
                         value = value.substring(1, value.length() - 1);
                     }
-                    
+
                     // 尝试转换为数值类型
                     Object parsedValue = parseValue(value);
                     conditions.put(column, parsedValue);
@@ -1366,13 +1445,13 @@ public class ClientServiceImpl implements ClientService {
     @Override
     public List<Map<String, Object>> select(String tableName, List<String> columns, Map<String, Object> conditions) {
         try {
-
-            // 与master更新表区域信息
-
+            // 获取表区域信息
+            if (!tableRegions.containsKey(tableName)) {
                 updateTableRegions(tableName);
-
+            }
             
             List<String> servers = tableRegions.get(tableName);
+
             if (servers == null || servers.isEmpty()) {
                 System.err.println("找不到表所在的RegionServer: " + tableName);
                 return new ArrayList<>();
@@ -1399,21 +1478,9 @@ public class ClientServiceImpl implements ClientService {
                     resultsFromRegions.put(regionServer, result);
                     System.out.println("成功从 " + regionServer + " 查询 " + result.size() + " 条记录");
                 }
-//                //从所有分片服务器上面查询数据
-//                try {
-//                    RegionService regionService = RPCUtils.getRegionService(regionServer);
-//                    List<Map<String, Object>> result = regionService.select(tableName, columns, conditions);
-//                    resultsFromRegions.put(regionServer, result);
-//                    System.out.println("成功从 " + regionServer + " 查询 " + result.size() + " 条记录");
-//                } catch (Exception e) {
-//                    unavailableServers.add(regionServer);
-//                    System.err.println("RegionServer " + regionServer + " 查询失败" );
-//
-//                    // 从缓存中移除
-//                    RPCUtils.removeFromCache("region:" + regionServer);
-//                }
+
             }
-            
+
             // 合并结果，避免重复数据
             List<Map<String, Object>> mergedResults = mergeQueryResults(tableName, resultsFromRegions);
             
@@ -1612,10 +1679,10 @@ public class ClientServiceImpl implements ClientService {
      */
     private Message executeDelete(String tableName, Map<String, Object> conditions) {
         try {
-            // 更新表区域信息
-
+            // 获取表区域信息
+            if (!tableRegions.containsKey(tableName)) {
                 updateTableRegions(tableName);
-
+            }
             
             List<String> servers = tableRegions.get(tableName);
             if (servers == null || servers.isEmpty()) {
@@ -1689,10 +1756,10 @@ public class ClientServiceImpl implements ClientService {
     @Override
     public Message update(String tableName, Map<String, Object> values, Map<String, Object> conditions) {
         try {
-            // 更新表区域信息
-
+            // 获取表区域信息
+            if (!tableRegions.containsKey(tableName)) {
                 updateTableRegions(tableName);
-
+            }
             
             List<String> servers = tableRegions.get(tableName);
             if (servers == null || servers.isEmpty()) {
@@ -1766,10 +1833,10 @@ public class ClientServiceImpl implements ClientService {
     @Override
     public Message delete(String tableName, Map<String, Object> conditions) {
         try {
-            // 更新表区域信息
-
+            // 获取表区域信息
+            if (!tableRegions.containsKey(tableName)) {
                 updateTableRegions(tableName);
-
+            }
             
             List<String> servers = tableRegions.get(tableName);
             if (servers == null || servers.isEmpty()) {
@@ -1843,10 +1910,10 @@ public class ClientServiceImpl implements ClientService {
     @Override
     public Message insert(String tableName, Map<String, Object> values) {
         try {
-            // 更新表区域信息
-
+            // 获取表区域信息
+            if (!tableRegions.containsKey(tableName)) {
                 updateTableRegions(tableName);
-
+            }
             
             List<String> servers = tableRegions.get(tableName);
             if (servers == null || servers.isEmpty()) {
