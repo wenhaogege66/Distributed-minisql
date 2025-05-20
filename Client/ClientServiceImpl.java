@@ -1366,10 +1366,11 @@ public class ClientServiceImpl implements ClientService {
     @Override
     public List<Map<String, Object>> select(String tableName, List<String> columns, Map<String, Object> conditions) {
         try {
-            // 获取表区域信息
-            if (!tableRegions.containsKey(tableName)) {
+
+            // 与master更新表区域信息
+
                 updateTableRegions(tableName);
-            }
+
             
             List<String> servers = tableRegions.get(tableName);
             if (servers == null || servers.isEmpty()) {
@@ -1611,10 +1612,10 @@ public class ClientServiceImpl implements ClientService {
      */
     private Message executeDelete(String tableName, Map<String, Object> conditions) {
         try {
-            // 获取表区域信息
-            if (!tableRegions.containsKey(tableName)) {
+            // 更新表区域信息
+
                 updateTableRegions(tableName);
-            }
+
             
             List<String> servers = tableRegions.get(tableName);
             if (servers == null || servers.isEmpty()) {
@@ -1688,10 +1689,10 @@ public class ClientServiceImpl implements ClientService {
     @Override
     public Message update(String tableName, Map<String, Object> values, Map<String, Object> conditions) {
         try {
-            // 获取表区域信息
-            if (!tableRegions.containsKey(tableName)) {
+            // 更新表区域信息
+
                 updateTableRegions(tableName);
-            }
+
             
             List<String> servers = tableRegions.get(tableName);
             if (servers == null || servers.isEmpty()) {
@@ -1765,10 +1766,10 @@ public class ClientServiceImpl implements ClientService {
     @Override
     public Message delete(String tableName, Map<String, Object> conditions) {
         try {
-            // 获取表区域信息
-            if (!tableRegions.containsKey(tableName)) {
+            // 更新表区域信息
+
                 updateTableRegions(tableName);
-            }
+
             
             List<String> servers = tableRegions.get(tableName);
             if (servers == null || servers.isEmpty()) {
@@ -1842,10 +1843,10 @@ public class ClientServiceImpl implements ClientService {
     @Override
     public Message insert(String tableName, Map<String, Object> values) {
         try {
-            // 获取表区域信息
-            if (!tableRegions.containsKey(tableName)) {
+            // 更新表区域信息
+
                 updateTableRegions(tableName);
-            }
+
             
             List<String> servers = tableRegions.get(tableName);
             if (servers == null || servers.isEmpty()) {
